@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/iphone-gateway/ui-tree-result.schema.json",
+  "title": "Henyo common ui.tree result revision 1",
+  "type": "object",
+  "required": ["ok", "schemaRevision", "treeVersion", "serviceEpoch", "capturedAt", "root", "truncated"],
+  "additionalProperties": false,
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["text", "desc", "viewId", "className", "clickable", "editable", "focused", "enabled", "depth", "index", "bounds", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "maxLength": 4096},
+        "desc": {"type": "string", "maxLength": 4096},
+        "viewId": {"type": "string", "maxLength": 4096},
+        "className": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "clickable": {"type": ["boolean", "null"]},
+        "editable": {"type": "boolean"},
+        "focused": {"type": ["boolean", "null"]},
+        "enabled": {"type": "boolean"},
+        "depth": {"type": "integer", "minimum": 0, "maximum": 32},
+        "index": {"type": "integer", "minimum": 0},
+        "bounds": {"type": "string", "pattern": "^-?[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+$"},
+        "children": {"type": "array", "maxItems": 1200, "items": {"$ref": "#/$defs/node"}}
+      }
+    }
+  },
+  "properties": {
+    "ok": {"const": true},
+    "schemaRevision": {"const": "henyo.ui-tree/1"},
+    "treeVersion": {"type": "integer", "minimum": 1},
+    "serviceEpoch": {"type": "string", "minLength": 1, "maxLength": 256},
+    "capturedAt": {"type": "string", "minLength": 20, "maxLength": 40},
+    "root": {"$ref": "#/$defs/node"},
+    "truncated": {"const": false}
+  }
+}

@@ -1,0 +1,1377 @@
+openapi: 3.1.0
+info:
+  title: Henyo Control API
+  version: 1.0.0
+  description: |
+    Local device UI control API for Henyo accessibility backends.
+
+    Remote access is disabled by default. The default listener is
+    `127.0.0.1:8765`, which keeps existing Termux-on-device workflows local.
+    When remote access is explicitly enabled, the service may bind to a
+    non-loopback address and accepts remote requests only from configured
+    allowed CIDRs. The default allowed Tailnet CIDRs are `100.64.0.0/10` and
+    `fd7a:115c:a1e0::/48`.
+
+    Tailnet source IP is a network admission check only. It is never sufficient
+    authentication for control APIs. Remote control requests from allowed CIDRs
+    must include `Authorization: Bearer <token>`. Tokens are registered through
+    a pairing session that is started locally on the Android device and
+    confirmed with a short-lived, screen-visible 6-digit TOTP PIN. During the
+    migration to pairing, `POST /v1/auth/tokens/local` is a localhost-only
+    bootstrap endpoint that returns a raw token exactly once.
+servers:
+  - url: http://127.0.0.1:8765
+tags:
+  - name: limited-health
+    description: Limited status endpoints available on localhost and allowed remote CIDRs.
+  - name: local-management
+    description: Localhost-only management endpoints for remote access settings and pairing lifecycle.
+  - name: remote-pairing
+    description: Pairing endpoints reachable from allowed remote CIDRs during an active pairing window.
+  - name: authenticated-control
+    description: UI/device control endpoints. Remote clients require Bearer auth in addition to allowed source CIDR.
+  - name: token-management
+    description: Token inventory and revocation endpoints. Remote clients require Bearer auth in addition to allowed source CIDR.
+paths:
+  /v1/health:
+    get:
+      tags: [limited-health]
+      operationId: health
+      description: |
+        Limited service status. This endpoint is available on localhost. When
+        remote access is enabled, allowed CIDRs may call it without Bearer auth
+        so clients can discover service state. It must not expose raw tokens,
+        pairing secrets, TOTP PINs, UI tree payloads, or screenshots.
+      x-henyo-endpoint-class: limited-health
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: allowed-without-bearer
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Service status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/remote/access:
+    get:
+      tags: [local-management]
+      operationId: remoteAccessStatus
+      description: |
+        Returns the configured and effective remote access state. This
+        management endpoint is localhost-only.
+      x-henyo-endpoint-class: local-only-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: denied
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Remote access status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteAccessStatusResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+    put:
+      tags: [local-management]
+      operationId: remoteAccessUpdate
+      description: |
+        Updates remote access settings. Remote access remains disabled unless
+        explicitly enabled here or through the Android UI. This endpoint is
+        localhost-only.
+      x-henyo-endpoint-class: local-only-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: denied
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RemoteAccessUpdateRequest"
+      responses:
+        "200":
+          description: Updated remote access status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemoteAccessStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/remote/pairing:
+    get:
+      tags: [remote-pairing]
+      operationId: pairingStatus
+      description: |
+        Returns pairing state without exposing the raw pairing secret or current
+        PIN. Remote clients use the public pairing id from this response while
+        the Android screen supplies the 6-digit PIN.
+      x-henyo-endpoint-class: pairing-status
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: allowed-without-bearer-auth
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Pairing status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairingStatusResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+    post:
+      tags: [local-management]
+      operationId: pairingStart
+      description: |
+        Starts a short-lived pairing session and causes the Android UI to show a
+        6-digit TOTP PIN with a countdown ring and next-code hint. The PIN is
+        screen-visible only and is never returned by this API. This management
+        endpoint is localhost-only.
+      x-henyo-endpoint-class: local-only-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: denied
+        otherAddresses: denied
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PairingStartRequest"
+      responses:
+        "200":
+          description: Active pairing status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairingStatusResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [local-management]
+      operationId: pairingCancel
+      description: Cancels the active pairing session. This management endpoint is localhost-only.
+      x-henyo-endpoint-class: local-only-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: denied
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Pairing status after cancellation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairingStatusResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/remote/pairing/register:
+    post:
+      tags: [remote-pairing]
+      operationId: pairingRegisterToken
+      description: |
+        Registers a remote client token during an active pairing session. The
+        request must come from an allowed remote CIDR; this is intentionally not
+        a localhost compatibility endpoint. Remote access must be enabled. The
+        request is authorized by the active pairing id plus the screen-visible
+        6-digit TOTP PIN, not by Tailnet source IP alone. The Python CLI can
+        fetch the public pairing id automatically, so users normally type only
+        the visible PIN. To tolerate agent latency, Henyo accepts the current
+        code, the displayed next code, and the six preceding 30-second codes.
+        The raw Bearer token is returned exactly once in this response and must
+        never be logged.
+      x-henyo-endpoint-class: remote-pairing
+      x-henyo-access:
+        localhost: denied
+        allowedRemoteCidrs: allowed-with-active-pairing-pin
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PairingRegisterRequest"
+      responses:
+        "200":
+          description: Newly registered token. The raw token is returned once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenRegistrationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+        "409":
+          $ref: "#/components/responses/PairingUnavailable"
+        "429":
+          $ref: "#/components/responses/TooManyPairingAttempts"
+  /v1/auth/tokens:
+    get:
+      tags: [token-management]
+      operationId: tokenList
+      description: |
+        Lists stored token metadata without raw token values. Localhost may call
+        this endpoint directly. Remote callers must come from an allowed CIDR
+        and present a valid Bearer token.
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: token-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Token metadata list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenListResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/auth/tokens/local:
+    post:
+      tags: [local-management]
+      operationId: localTokenCreate
+      description: |
+        Temporary localhost-only bootstrap endpoint for creating a Bearer token
+        before the pairing UI is implemented. It returns the raw Bearer token
+        exactly once and stores only token metadata plus a verifier/hash. Remote
+        callers are always denied by source policy.
+      x-henyo-endpoint-class: local-only-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: denied
+        otherAddresses: denied
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalTokenCreateRequest"
+      responses:
+        "200":
+          description: Newly created local bootstrap token. The raw token is returned once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenRegistrationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/auth/tokens/{tokenId}:
+    delete:
+      tags: [token-management]
+      operationId: tokenRevoke
+      description: |
+        Revokes a token immediately. Localhost may call this endpoint directly.
+        Remote callers must come from an allowed CIDR and present a valid Bearer
+        token.
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: token-management
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revoke result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/app/current:
+    get:
+      tags: [authenticated-control]
+      operationId: appCurrent
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Current foreground app.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppCurrentResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/app/launch:
+    post:
+      tags: [authenticated-control]
+      operationId: appLaunch
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppLaunchRequest"
+      responses:
+        "200":
+          description: Launch result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/app/start:
+    post:
+      tags: [authenticated-control]
+      operationId: appStart
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStartRequest"
+      responses:
+        "200":
+          description: Start result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/tree:
+    get:
+      tags: [authenticated-control]
+      operationId: uiTree
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      parameters:
+        - $ref: "#/components/parameters/MaxDepth"
+        - $ref: "#/components/parameters/MaxNodes"
+        - $ref: "#/components/parameters/OnlyTextNodes"
+        - $ref: "#/components/parameters/Redact"
+      responses:
+        "200":
+          description: UI tree or flat text-node list.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/TreeResponse"
+                  - $ref: "#/components/schemas/FlatTreeResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/find:
+    post:
+      tags: [authenticated-control]
+      operationId: uiFind
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FindRequest"
+      responses:
+        "200":
+          description: Matched node.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/click:
+    post:
+      tags: [authenticated-control]
+      operationId: uiClick
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClickRequest"
+      responses:
+        "200":
+          description: Click result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClickResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/set-text:
+    post:
+      tags: [authenticated-control]
+      operationId: uiSetText
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetTextRequest"
+      responses:
+        "200":
+          description: Text input result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/tap:
+    post:
+      tags: [authenticated-control]
+      operationId: uiTap
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TapRequest"
+      responses:
+        "200":
+          description: Tap result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/swipe:
+    post:
+      tags: [authenticated-control]
+      operationId: uiSwipe
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SwipeRequest"
+      responses:
+        "200":
+          description: Swipe result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/scroll:
+    post:
+      tags: [authenticated-control]
+      operationId: uiScroll
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScrollRequest"
+      responses:
+        "200":
+          description: Scroll result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/scroll-until:
+    post:
+      tags: [authenticated-control]
+      operationId: uiScrollUntil
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScrollUntilRequest"
+      responses:
+        "200":
+          description: Matched node after scrolling.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScrollUntilResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/ui/wait:
+    post:
+      tags: [authenticated-control]
+      operationId: uiWait
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WaitRequest"
+      responses:
+        "200":
+          description: Wait result.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/NodeResponse"
+                  - $ref: "#/components/schemas/GoneResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/screen/screenshot:
+    get:
+      tags: [authenticated-control]
+      operationId: screenScreenshot
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      parameters:
+        - name: timeout
+          in: query
+          schema:
+            type: integer
+            default: 5000
+            minimum: 1
+      responses:
+        "200":
+          description: PNG screenshot bytes. The service does not persist this image.
+          headers:
+            X-Henyo-Capture-Id:
+              description: Short-lived id used with screenshot-coordinate gestures.
+              schema: {type: string}
+            X-Henyo-Capture-Bounds:
+              description: Comma-separated left,top,right,bottom bounds in screen pixels.
+              schema: {type: string}
+            X-Henyo-Capture-Scale:
+              description: Comma-separated screenshot-to-screen X and Y scale.
+              schema: {type: string}
+            X-Henyo-Mapping-Certain:
+              description: Whether Henyo will accept this mapping for a gesture.
+              schema: {type: boolean}
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "500":
+          description: Screenshot failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/global/back:
+    post:
+      tags: [authenticated-control]
+      operationId: globalBack
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Back action result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+  /v1/global/home:
+    post:
+      tags: [authenticated-control]
+      operationId: globalHome
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires-bearer
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Home action result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-token
+      description: |
+        Required for remote control and token-management requests from allowed
+        CIDRs. Localhost compatibility is expressed by each operation's
+        `x-henyo-access` extension because OpenAPI security schemes cannot
+        model source-address-dependent auth. Generic OpenAPI clients may treat
+        Bearer auth as required for all sources; Henyo implementations must use
+        `x-henyo-access` as the source-of-truth access policy.
+  parameters:
+    MaxDepth:
+      name: maxDepth
+      in: query
+      schema:
+        type: integer
+        default: 8
+        minimum: 0
+    MaxNodes:
+      name: maxNodes
+      in: query
+      schema:
+        type: integer
+        default: 500
+        minimum: 1
+    OnlyTextNodes:
+      name: onlyTextNodes
+      in: query
+      schema:
+        type: boolean
+        default: false
+    Redact:
+      name: redact
+      in: query
+      schema:
+        type: boolean
+        default: false
+  responses:
+    AuthError:
+      description: Missing, malformed, expired, revoked, or invalid Bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthErrorResponse"
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Request conflicts with current service state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ForbiddenBySource:
+      description: Source address is not allowed for this endpoint class.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthErrorResponse"
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PairingUnavailable:
+      description: No usable pairing session, or another pairing session is already active.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthErrorResponse"
+    TooManyPairingAttempts:
+      description: Pairing PIN failure rate limit exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthErrorResponse"
+  schemas:
+    ErrorCode:
+      type: string
+      enum:
+        - bad_request
+        - remote_access_disabled
+        - source_not_allowed
+        - auth_required
+        - auth_malformed
+        - auth_invalid
+        - auth_revoked
+        - pairing_required
+        - pairing_expired
+        - pairing_cancelled
+        - pairing_used
+        - pairing_already_active
+        - pairing_pin_invalid
+        - pairing_rate_limited
+        - not_found
+        - conflict
+    ErrorResponse:
+      type: object
+      required: [ok, error, code]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: string
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+    AuthErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            auth:
+              type: object
+              properties:
+                required:
+                  type: boolean
+                scheme:
+                  type: string
+                  enum: [Bearer, pairing-pin]
+                sourceAllowed:
+                  type: boolean
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+    HealthResponse:
+      type: object
+      required: [ok, service, lastEventTime]
+      properties:
+        ok:
+          type: boolean
+        service:
+          type: string
+        lastEventTime:
+          type: integer
+          format: int64
+        remoteAccess:
+          $ref: "#/components/schemas/RemoteAccessSummary"
+    RemoteAccessSummary:
+      type: object
+      required: [enabled, bindHost, bindPort, allowedCidrs]
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: Remote access is disabled by default.
+        bindHost:
+          type: string
+          default: 127.0.0.1
+          description: Actual listener host currently serving requests. Localhost is the default.
+        bindPort:
+          type: integer
+          default: 8765
+        allowedCidrs:
+          type: array
+          description: Source CIDRs allowed to reach remote-enabled endpoints.
+          default: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+          items:
+            type: string
+        activePairing:
+          type: boolean
+          description: True when a pairing session is active. Does not expose PINs or secrets.
+        tokenCount:
+          type: integer
+          minimum: 0
+          description: Count of stored token records, excluding raw token values.
+        remoteServing:
+          type: boolean
+          description: True only when the runtime listener is actually serving remote clients.
+    RemoteAccessStatusResponse:
+      type: object
+      required: [ok, remoteAccess, endpointClasses]
+      properties:
+        ok:
+          type: boolean
+        remoteAccess:
+          allOf:
+            - $ref: "#/components/schemas/RemoteAccessSummary"
+            - type: object
+              properties:
+                configuredBindHost:
+                  type: string
+                  default: 127.0.0.1
+                effectiveBindHost:
+                  type: string
+                  default: 127.0.0.1
+                  description: Actual listener host currently serving requests.
+                desiredBindHost:
+                  type: string
+                  default: 127.0.0.1
+                  description: Config-derived bind host requested by remote access settings.
+                remoteServing:
+                  type: boolean
+                  description: True only when the runtime listener is actually serving remote clients.
+                effectiveRemoteEnabled:
+                  type: boolean
+                  description: True only when remote settings are enabled and the runtime listener is serving remote clients.
+                localOnlyManagement:
+                  type: boolean
+                  const: true
+                  description: Management endpoints remain localhost-only even when remote access is enabled.
+        endpointClasses:
+          type: array
+          items:
+            $ref: "#/components/schemas/EndpointClassPolicy"
+    RemoteAccessUpdateRequest:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        bindHost:
+          type: string
+          default: 127.0.0.1
+          description: Non-loopback values are effective only when remote access is explicitly enabled.
+        bindPort:
+          type: integer
+          default: 8765
+          minimum: 1
+          maximum: 65535
+        allowedCidrs:
+          type: array
+          default: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+          items:
+            type: string
+          description: Remote source CIDRs admitted before endpoint auth is evaluated.
+    EndpointClassPolicy:
+      type: object
+      required: [className, localhost, allowedRemoteCidrs, otherAddresses]
+      properties:
+        className:
+          type: string
+          enum:
+            - local-only-management
+            - pairing-status
+            - remote-pairing
+            - authenticated-control
+            - limited-health
+            - token-management
+        localhost:
+          type: string
+        allowedRemoteCidrs:
+          type: string
+        otherAddresses:
+          type: string
+    PairingStartRequest:
+      type: object
+      properties:
+        ttlSeconds:
+          type: integer
+          default: 300
+          minimum: 30
+          maximum: 900
+        clientHint:
+          type: string
+          description: Optional label shown locally while waiting for registration.
+    PairingStatusResponse:
+      type: object
+      required: [ok, active]
+      properties:
+        ok:
+          type: boolean
+        active:
+          type: boolean
+        pairingId:
+          type: string
+          description: Public pairing identifier. Not a secret.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        pinDigits:
+          type: integer
+          const: 6
+          description: The API reports PIN length only. The PIN is shown on the Android screen.
+        attemptsRemaining:
+          type: integer
+          minimum: 0
+        state:
+          type: string
+          enum: [inactive, active, expired, cancelled, used, locked]
+    PairingRegisterRequest:
+      type: object
+      required: [pairingId, pin, clientName]
+      properties:
+        pairingId:
+          type: string
+        pin:
+          type: string
+          pattern: "^[0-9]{6}$"
+          description: Screen-visible 6-digit TOTP PIN from the Android device.
+        clientName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        requestedScopes:
+          type: array
+          default: [control]
+          items:
+            type: string
+            enum: [control, token-management]
+    LocalTokenCreateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          default: local-management
+          minLength: 1
+          maxLength: 80
+          description: Local display name for the bootstrap token.
+        requestedScopes:
+          type: array
+          default: [control, token-management]
+          items:
+            type: string
+            enum: [control, token-management]
+    TokenMetadata:
+      type: object
+      required: [id, name, scopes, createdAt, revoked]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [control, token-management]
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        lastSourceAddress:
+          type: string
+          description: Last observed source address, for audit display only.
+        revoked:
+          type: boolean
+        revokedAt:
+          type: string
+          format: date-time
+    TokenRegistrationResponse:
+      type: object
+      required: [ok, token, tokenType, tokenMetadata]
+      properties:
+        ok:
+          type: boolean
+        token:
+          type: string
+          description: Raw Bearer token returned exactly once. Store only a hash server-side.
+        tokenType:
+          type: string
+          const: Bearer
+        tokenMetadata:
+          $ref: "#/components/schemas/TokenMetadata"
+    TokenListResponse:
+      type: object
+      required: [ok, tokens]
+      properties:
+        ok:
+          type: boolean
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenMetadata"
+    AppCurrentResponse:
+      type: object
+      required: [ok, package, className]
+      properties:
+        ok:
+          type: boolean
+        package:
+          type: string
+        className:
+          type: string
+        error:
+          type: string
+    AppLaunchRequest:
+      type: object
+      required: [package]
+      properties:
+        package:
+          type: string
+    AppStartRequest:
+      type: object
+      required: [component]
+      properties:
+        component:
+          type: string
+    Selector:
+      type: object
+      properties:
+        text:
+          type: string
+        field:
+          type: string
+          enum: [text, desc, viewId, any]
+          default: any
+        exact:
+          type: boolean
+          default: false
+        clickableOnly:
+          type: boolean
+          default: false
+        visibleOnly:
+          type: boolean
+          default: true
+    Node:
+      type: object
+      properties:
+        text:
+          type: string
+        desc:
+          type: string
+        viewId:
+          type: string
+        className:
+          type: string
+        clickable:
+          type: boolean
+        editable:
+          type: boolean
+        focused:
+          type: boolean
+        enabled:
+          type: boolean
+        bounds:
+          type: string
+          description: Comma-separated left,top,right,bottom screen coordinates.
+        centerX:
+          type: integer
+        centerY:
+          type: integer
+        depth:
+          type: integer
+        index:
+          type: integer
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/Node"
+    TreeResponse:
+      type: object
+      required: [ok, root, truncated]
+      properties:
+        ok:
+          type: boolean
+        root:
+          $ref: "#/components/schemas/Node"
+        truncated:
+          type: boolean
+    FlatTreeResponse:
+      type: object
+      required: [ok, nodes, truncated]
+      properties:
+        ok:
+          type: boolean
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Node"
+        truncated:
+          type: boolean
+    FindRequest:
+      type: object
+      required: [selector]
+      properties:
+        selector:
+          $ref: "#/components/schemas/Selector"
+        redact:
+          type: boolean
+          default: false
+    ClickRequest:
+      type: object
+      properties:
+        selector:
+          $ref: "#/components/schemas/Selector"
+        x:
+          type: integer
+          description: Direct click x coordinate. Requires `y`.
+        y:
+          type: integer
+          description: Direct click y coordinate. Requires `x`.
+        bounds:
+          type: string
+          description: Comma-separated left,top,right,bottom bounds. Clicks the center point.
+        redact:
+          type: boolean
+          default: false
+    NodeResponse:
+      type: object
+      required: [ok, node]
+      properties:
+        ok:
+          type: boolean
+        node:
+          $ref: "#/components/schemas/Node"
+        error:
+          type: string
+        texts:
+          type: array
+          items:
+            type: string
+    ClickResponse:
+      type: object
+      required: [ok, strategy]
+      properties:
+        ok:
+          type: boolean
+        strategy:
+          type: string
+          enum: [node, clickable_parent, tap, coordinate]
+        error:
+          type: string
+    SetTextRequest:
+      type: object
+      required: [value]
+      properties:
+        selector:
+          $ref: "#/components/schemas/Selector"
+        value:
+          type: string
+        clear:
+          type: boolean
+          default: true
+    TapRequest:
+      type: object
+      required: [x, y]
+      properties:
+        x:
+          type: integer
+        y:
+          type: integer
+        coordinateSpace:
+          type: string
+          enum: [screen, screenshot]
+          default: screen
+        captureId:
+          type: string
+          description: Required when coordinateSpace is screenshot; returned with the source capture.
+    SwipeRequest:
+      type: object
+      required: [x1, y1, x2, y2]
+      properties:
+        x1:
+          type: integer
+        y1:
+          type: integer
+        x2:
+          type: integer
+        y2:
+          type: integer
+        duration:
+          type: integer
+          default: 300
+        coordinateSpace:
+          type: string
+          enum: [screen, screenshot]
+          default: screen
+        captureId:
+          type: string
+          description: Required when coordinateSpace is screenshot; returned with the source capture.
+    ScrollRequest:
+      type: object
+      properties:
+        direction:
+          type: string
+          enum: [down, up]
+          default: down
+        duration:
+          type: integer
+          default: 350
+    ScrollUntilRequest:
+      allOf:
+        - $ref: "#/components/schemas/FindRequest"
+        - type: object
+          properties:
+            attempts:
+              type: integer
+              default: 8
+            interval:
+              type: integer
+              default: 250
+            direction:
+              type: string
+              enum: [down, up]
+              default: down
+    ScrollUntilResponse:
+      type: object
+      required: [ok, attempts, node]
+      properties:
+        ok:
+          type: boolean
+        attempts:
+          type: integer
+        node:
+          $ref: "#/components/schemas/Node"
+        error:
+          type: string
+        texts:
+          type: array
+          items:
+            type: string
+    WaitRequest:
+      allOf:
+        - $ref: "#/components/schemas/FindRequest"
+        - type: object
+          properties:
+            timeout:
+              type: integer
+              default: 5000
+            interval:
+              type: integer
+              default: 100
+            gone:
+              type: boolean
+              default: false
+    GoneResponse:
+      type: object
+      required: [ok, gone]
+      properties:
+        ok:
+          type: boolean
+        gone:
+          type: boolean

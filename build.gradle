@@ -1,0 +1,316 @@
+import java.nio.file.Files
+
+def androidSdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+def androidJar = System.getenv("HENYO_ANDROID_JAR") ?:
+        (androidSdkRoot ? "${androidSdkRoot}/platforms/android-30/android.jar" : "${projectDir}/sdk/android-11/android.jar")
+def compileAndroidJar = System.getenv("HENYO_COMPILE_ANDROID_JAR") ?:
+        (androidSdkRoot ? "${androidSdkRoot}/platforms/android-35/android.jar" : "${projectDir}/sdk/android-35/android.jar")
+def appId = System.getenv("HENYO_APP_ID") ?: "link.liaru.henyo"
+def versionCode = findProperty("henyoVersionCode") ?: System.getenv("HENYO_VERSION_CODE") ?: "1"
+def versionName = findProperty("henyoVersionName") ?: System.getenv("HENYO_VERSION_NAME") ?: "0.1.0"
+def minSdk = "26"
+def targetSdk = "30"
+def outDir = layout.buildDirectory.get().asFile
+def genDir = file("${outDir}/generated")
+def classesDir = file("${outDir}/classes")
+def classesJar = file("${outDir}/classes.jar")
+def dexDir = file("${outDir}/dex")
+def resZip = file("${outDir}/compiled-res.zip")
+def linkedApk = file("${outDir}/linked.apk")
+def unsignedApk = file("${outDir}/henyo-unsigned.apk")
+def debugApk = file("${outDir}/henyo-debug.apk")
+def releaseApk = file("${outDir}/henyo-v${versionName}.apk")
+def debugKeystore = System.getenv("HENYO_DEBUG_KEYSTORE")
+        ? file(System.getenv("HENYO_DEBUG_KEYSTORE"))
+        : file("${System.getProperty('user.home')}/.config/henyo/signing/${appId}-debug.keystore")
+
+if (!(versionCode ==~ /[1-9][0-9]{0,9}/) || versionCode.toLong() > 2100000000L) {
+    throw new GradleException("HENYO_VERSION_CODE must be in Android's positive version-code range")
+}
+if (!(versionName ==~ /[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}/)) {
+    throw new GradleException("HENYO_VERSION_NAME is invalid")
+}
+
+tasks.register("compileResources", Exec) {
+    inputs.dir("src/main/res")
+    outputs.file(resZip)
+    doFirst {
+        outDir.mkdirs()
+        resZip.delete()
+    }
+    commandLine "aapt2", "compile", "--dir", "src/main/res", "-o", resZip.absolutePath
+}
+
+tasks.register("linkResources", Exec) {
+    dependsOn "compileResources"
+    inputs.file("src/main/AndroidManifest.xml")
+    inputs.file(resZip)
+    outputs.file(linkedApk)
+    outputs.dir(genDir)
+    doFirst {
+        outDir.mkdirs()
+        delete(genDir)
+        genDir.mkdirs()
+        linkedApk.delete()
+    }
+    commandLine "aapt2", "link",
+            "-I", androidJar,
+            "--manifest", "src/main/AndroidManifest.xml",
+            "--rename-manifest-package", appId,
+            "--java", genDir.absolutePath,
+            "--min-sdk-version", minSdk,
+            "--target-sdk-version", targetSdk,
+            "--version-code", versionCode,
+            "--version-name", versionName,
+            "-o", linkedApk.absolutePath,
+            resZip.absolutePath
+}
+
+tasks.register("compileJava", Exec) {
+    dependsOn "linkResources"
+    inputs.dir("src/main/java")
+    inputs.dir(genDir)
+    outputs.dir(classesDir)
+    doFirst {
+        delete(classesDir)
+        classesDir.mkdirs()
+    }
+    commandLine "sh", "-c", """
+        find src/main/java ${genDir.absolutePath} -name '*.java' > ${outDir.absolutePath}/sources.txt &&
+        javac -encoding UTF-8 -source 11 -target 11 \
+          -classpath ${compileAndroidJar} \
+          -d ${classesDir.absolutePath} \
+          @${outDir.absolutePath}/sources.txt
+    """
+}
+
+tasks.register("verifyPairingTotp", Exec) {
+    inputs.file("scripts/verify-pairing-totp.sh")
+    inputs.file("src/main/java/link/liaru/henyo/BearerTokenManager.java")
+    inputs.file("src/main/java/link/liaru/henyo/PairingSessionManager.java")
+    commandLine "sh", "scripts/verify-pairing-totp.sh"
+}
+
+tasks.register("verifyWebSocketProtocol", Exec) {
+    inputs.file("scripts/verify-websocket-protocol.sh")
+    inputs.file("src/main/java/link/liaru/henyo/WebSocketProtocol.java")
+    commandLine "sh", "scripts/verify-websocket-protocol.sh"
+}
+
+tasks.register("verifyWebSocketSessionPolicy", Exec) {
+    inputs.file("scripts/verify-ws-session-policy.sh")
+    inputs.file("src/main/java/link/liaru/henyo/WebSocketSessionPolicy.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    commandLine "sh", "scripts/verify-ws-session-policy.sh"
+}
+
+tasks.register("verifyTermuxCommandBridge", Exec) {
+    inputs.file("scripts/verify-termux-command-bridge.sh")
+    inputs.file("src/main/AndroidManifest.xml")
+    inputs.file("src/main/java/link/liaru/henyo/BearerTokenManager.java")
+    inputs.file("src/main/java/link/liaru/henyo/TermuxCommandBridge.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.file("src/main/java/link/liaru/henyo/WsOperation.java")
+    inputs.file("python/henyo/cli.py")
+    inputs.file("python/henyo/helper.py")
+    commandLine "sh", "scripts/verify-termux-command-bridge.sh"
+}
+
+tasks.register("verifyConnectivityWatchdog", Exec) {
+    inputs.file("scripts/verify-connectivity-watchdog.py")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.file("src/main/java/link/liaru/henyo/TailscaleWatchdog.java")
+    inputs.file("src/main/java/link/liaru/henyo/MainActivity.java")
+    commandLine "python", "scripts/verify-connectivity-watchdog.py"
+}
+
+tasks.register("verifyScreenshotCoordinateMapper", Exec) {
+    inputs.file("scripts/verify-screenshot-coordinate-mapper.sh")
+    inputs.file("src/main/java/link/liaru/henyo/ScreenshotCoordinateMapper.java")
+    inputs.file("src/test/java/link/liaru/henyo/ScreenshotCoordinateMapperTest.java")
+    commandLine "bash", "scripts/verify-screenshot-coordinate-mapper.sh"
+}
+
+tasks.register("verifyCursorMotionEasing", Exec) {
+    inputs.file("scripts/verify-cursor-motion-easing.py")
+    inputs.file("src/main/java/link/liaru/henyo/MotionEasing.java")
+    inputs.file("src/main/java/link/liaru/henyo/ConnectionStatusOverlay.java")
+    commandLine "python", "scripts/verify-cursor-motion-easing.py"
+}
+
+tasks.register("verifyTaskProgressModel", Exec) {
+    inputs.file("scripts/verify-task-progress-model.py")
+    inputs.file("src/main/java/link/liaru/henyo/TaskProgressModel.java")
+    commandLine "python", "scripts/verify-task-progress-model.py"
+}
+
+tasks.register("verifyTaskProgressContract", Exec) {
+    inputs.file("scripts/verify-task-progress-contract.py")
+    inputs.file("scripts/verify-task-progress-live.py")
+    inputs.file("src/main/java/link/liaru/henyo/WsOperation.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.file("src/main/java/link/liaru/henyo/ConnectionStatusOverlay.java")
+    inputs.file("python/henyo/helper.py")
+    inputs.file("python/henyo/cli.py")
+    inputs.file("docs/ws-control-protocol.md")
+    inputs.file("docs/helper-ipc.md")
+    inputs.file("skills/henyo-android-control/SKILL.md")
+    commandLine "python", "scripts/verify-task-progress-contract.py"
+}
+
+tasks.register("verifyTaskProgressHelper", Exec) {
+    inputs.file("scripts/verify-helper-intent-session.py")
+    inputs.file("python/henyo/helper.py")
+    inputs.file("python/henyo/cli.py")
+    commandLine "python", "scripts/verify-helper-intent-session.py"
+}
+
+tasks.register("verifyHelperSessionStatus", Exec) {
+    inputs.file("scripts/verify-helper-session-status.py")
+    inputs.file("scripts/verify-ui-tree-contract.py")
+    inputs.file("python/henyo/helper.py")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.dir("tests/fixtures/helper-session-status")
+    inputs.dir("tests/fixtures/ui-tree-contract")
+    inputs.file("docs/helper-ipc.md")
+    commandLine "sh", "-c", "python3 scripts/verify-helper-session-status.py && python3 scripts/verify-ui-tree-contract.py"
+}
+
+tasks.register("verifyCompletionSummary", Exec) {
+    inputs.file("scripts/verify-completion-summary.py")
+    inputs.file("src/main/java/link/liaru/henyo/CompletionMessageModel.java")
+    inputs.file("src/main/java/link/liaru/henyo/AgentActivityModel.java")
+    inputs.file("src/main/java/link/liaru/henyo/WsOperation.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.file("src/main/java/link/liaru/henyo/ConnectionStatusOverlay.java")
+    inputs.file("python/henyo/helper.py")
+    inputs.file("python/henyo/cli.py")
+    inputs.file("docs/ws-control-protocol.md")
+    inputs.file("docs/helper-ipc.md")
+    inputs.file("README.md")
+    inputs.file("skills/henyo-android-control/SKILL.md")
+    commandLine "python", "scripts/verify-completion-summary.py"
+}
+
+tasks.register("verifyResponseSemantics", Exec) {
+    inputs.file("scripts/verify-response-semantics.py")
+    inputs.file("python/henyo/helper.py")
+    commandLine "python", "scripts/verify-response-semantics.py"
+}
+
+tasks.register("verifySafeDeploy", Exec) {
+    inputs.file("scripts/deploy-android.sh")
+    inputs.file("scripts/verify-safe-deploy.sh")
+    commandLine "bash", "scripts/verify-safe-deploy.sh"
+}
+
+tasks.register("classesJar", Exec) {
+    dependsOn "compileJava", "verifyPairingTotp", "verifyWebSocketProtocol"
+    inputs.dir(classesDir)
+    outputs.file(classesJar)
+    doFirst {
+        classesJar.delete()
+    }
+    commandLine "sh", "-c", "cd ${classesDir.absolutePath} && jar cf ${classesJar.absolutePath} ."
+}
+
+tasks.register("check") {
+    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifySafeDeploy"
+}
+
+tasks.register("dex", Exec) {
+    dependsOn "classesJar"
+    inputs.file(classesJar)
+    outputs.dir(dexDir)
+    doFirst {
+        delete(dexDir)
+        dexDir.mkdirs()
+    }
+    commandLine "d8",
+            "--min-api", minSdk,
+            "--lib", compileAndroidJar,
+            "--output", dexDir.absolutePath,
+            classesJar.absolutePath
+}
+
+tasks.register("packageUnsigned", Exec) {
+    dependsOn "dex"
+    inputs.file(linkedApk)
+    inputs.file("${dexDir.absolutePath}/classes.dex")
+    outputs.file(unsignedApk)
+    doFirst {
+        Files.copy(linkedApk.toPath(), unsignedApk.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+    commandLine "sh", "-c", "cd ${dexDir.absolutePath} && zip -q ${unsignedApk.absolutePath} classes.dex"
+}
+
+tasks.register("debugKeystore", Exec) {
+    outputs.file(debugKeystore)
+    onlyIf { !debugKeystore.exists() }
+    doFirst {
+        debugKeystore.parentFile.mkdirs()
+    }
+    commandLine "keytool",
+            "-genkeypair",
+            "-keystore", debugKeystore.absolutePath,
+            "-storepass", "android",
+            "-keypass", "android",
+            "-alias", "androiddebugkey",
+            "-keyalg", "RSA",
+            "-keysize", "2048",
+            "-validity", "10000",
+            "-dname", "CN=Henyo Debug,O=liaru"
+}
+
+tasks.register("assembleDebug", Exec) {
+    dependsOn "packageUnsigned", "debugKeystore"
+    inputs.file(unsignedApk)
+    inputs.file(debugKeystore)
+    outputs.file(debugApk)
+    doFirst {
+        debugApk.delete()
+    }
+    commandLine "apksigner", "sign",
+            "--ks", debugKeystore.absolutePath,
+            "--ks-pass", "pass:android",
+            "--key-pass", "pass:android",
+            "--out", debugApk.absolutePath,
+            unsignedApk.absolutePath
+}
+
+tasks.register("assembleRelease", Exec) {
+    dependsOn "packageUnsigned"
+    inputs.file(unsignedApk)
+    outputs.file(releaseApk)
+    outputs.upToDateWhen { false }
+    doFirst {
+        def required = [
+                "HENYO_RELEASE_KEYSTORE",
+                "HENYO_RELEASE_STORE_PASSWORD",
+                "HENYO_RELEASE_KEY_PASSWORD",
+                "HENYO_RELEASE_KEY_ALIAS",
+        ]
+        def missing = required.findAll { !System.getenv(it) }
+        if (!missing.isEmpty()) {
+            throw new GradleException("Release signing configuration is missing: ${missing.join(', ')}")
+        }
+        def releaseKeystore = file(System.getenv("HENYO_RELEASE_KEYSTORE"))
+        if (!releaseKeystore.isFile()) {
+            throw new GradleException("Release keystore does not exist: ${releaseKeystore}")
+        }
+        releaseApk.delete()
+        commandLine "apksigner", "sign",
+                "--ks", releaseKeystore.absolutePath,
+                "--ks-pass", "env:HENYO_RELEASE_STORE_PASSWORD",
+                "--key-pass", "env:HENYO_RELEASE_KEY_PASSWORD",
+                "--ks-key-alias", System.getenv("HENYO_RELEASE_KEY_ALIAS"),
+                "--out", releaseApk.absolutePath,
+                unsignedApk.absolutePath
+    }
+}
+
+tasks.register("clean") {
+    doLast {
+        delete(outDir)
+    }
+}

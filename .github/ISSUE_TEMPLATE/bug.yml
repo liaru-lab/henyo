@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem in Henyo.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include tokens, pairing codes, private UI text, screenshots, device identifiers, or private network details.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Android version, Henyo version or commit, and relevant non-sensitive setup details.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Additional verification
+      description: List checks already attempted without pasting sensitive logs.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, private screen content, and device-specific identifiers.
+          required: true

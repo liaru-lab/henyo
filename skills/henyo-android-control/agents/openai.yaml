@@ -1,0 +1,4 @@
+interface:
+  display_name: "Henyo Android Control"
+  short_description: "Safely control and deploy the Henyo Android bridge"
+  default_prompt: "Use $henyo-android-control to inspect, control, or safely deploy Henyo on this Android device."

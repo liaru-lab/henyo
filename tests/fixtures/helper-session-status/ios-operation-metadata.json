@@ -1,0 +1,26 @@
+{
+  "type": "event",
+  "event": "session.ready",
+  "protocolVersion": 1,
+  "contractRevision": "remote-control.core/1.0.0",
+  "requiresAuth": false,
+  "serviceEpoch": "ios-operation-epoch",
+  "deviceReady": true,
+  "deviceState": "ready",
+  "platform": {"name": "ios", "version": "27.0"},
+  "capabilities": {
+    "profile": "remote-control.core/1",
+    "features": ["expectedServiceEpoch", "mutationOutcome"],
+    "limits": {"batchSteps": 64},
+    "operations": {
+      "ui.tree": {"mutates": false, "schemaRevision": "henyo.ui-tree/1", "parameters": ["maxDepth", "maxNodes", "redact"], "defaultMaxDepth": 8, "maxDepth": 32, "defaultMaxNodes": 500, "maxNodes": 1200, "maxStringCodePoints": 4096, "maxStringUtf8Bytes": 16384, "maxResultBytes": 1048576, "timeoutMs": 60000, "nullableFields": ["clickable", "focused"], "redaction": "email-and-phone", "backendDetail": "drop-me"},
+      "screen.screenshot": {"mutates": false, "coordinateSpaces": ["screen", "screenshot"], "includeIndicator": false, "deviceSerial": "drop-me"},
+      "ui.tap": {"mutates": true, "coordinateSpaces": ["screen", "screenshot"]},
+      "app.activate": {"mutates": true, "identityField": "appId"},
+      "session.wakeHint": {"mutates": true, "provider": "drop-me"},
+      "input.text": {"mutates": true, "encoding": "unicode-scalar-sequence", "normalization": "none", "maxCodePoints": 4096, "maxUtf8Bytes": 16384, "secureTargetDetection": false, "pasteboardRestoration": "best-effort-compare-and-swap", "pasteboardId": "drop-me"},
+      "input.key": {"mutates": true, "keys": ["ENTER", "BACKSPACE", "A", "DIGIT_0", "FUTURE_KEY"], "modifiers": ["SHIFT", "META", "FUTURE_MODIFIER"], "rawUsages": [40]}
+    },
+    "privateDetail": "drop-me"
+  }
+}

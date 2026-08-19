@@ -1,0 +1,59 @@
+{
+  "caseId": "ui-tree-read-common-shape",
+  "description": "A read-only iOS source is projected into the existing nested Henyo ui.tree node shape without raw WDA fields.",
+  "initialState": {"authenticated": true, "serviceEpoch": "epoch-tree", "deviceLocked": false},
+  "clientFrames": [
+    {
+      "type": "call",
+      "id": "tree-1",
+      "op": "ui.tree",
+      "params": {"maxDepth": 8, "maxNodes": 500, "redact": false},
+      "expectedServiceEpoch": "epoch-tree"
+    }
+  ],
+  "expectedFrames": [
+    {
+      "type": "result",
+      "id": "tree-1",
+      "ok": true,
+      "result": {
+        "ok": true,
+        "schemaRevision": "henyo.ui-tree/1",
+        "treeVersion": 1,
+        "serviceEpoch": "epoch-tree",
+        "capturedAt": "2026-08-11T10:00:00.000Z",
+        "root": {
+          "text": "",
+          "desc": "Synthetic app",
+          "viewId": "synthetic.root",
+          "className": "Application",
+          "clickable": null,
+          "editable": false,
+          "focused": false,
+          "enabled": true,
+          "depth": 0,
+          "index": 0,
+          "bounds": "0,0,100,200",
+          "children": [
+            {
+              "text": "",
+              "desc": "Synthetic action",
+              "viewId": "synthetic.action",
+              "className": "Button",
+              "clickable": null,
+              "editable": false,
+              "focused": false,
+              "enabled": true,
+              "depth": 1,
+              "index": 0,
+              "bounds": "10,20,90,60",
+              "children": []
+            }
+          ]
+        },
+        "truncated": false
+      }
+    }
+  ],
+  "forbiddenEffects": ["device-mutation", "raw-wda-passthrough", "ui-content-log", "automatic-retry"]
+}

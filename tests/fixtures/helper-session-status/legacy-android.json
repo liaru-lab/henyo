@@ -1,0 +1,7 @@
+{
+  "type": "event",
+  "event": "session.ready",
+  "protocolVersion": 1,
+  "requiresAuth": false,
+  "serviceEpoch": "android-epoch"
+}

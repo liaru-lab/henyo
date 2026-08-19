@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Henyo</string>
+    <string name="service_name">Henyo Accessibility Bridge</string>
+</resources>

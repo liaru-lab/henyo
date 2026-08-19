@@ -1,0 +1,29 @@
+{
+  "text": "",
+  "desc": "",
+  "viewId": "",
+  "className": "android.view.View",
+  "clickable": false,
+  "editable": false,
+  "focused": false,
+  "enabled": true,
+  "depth": 0,
+  "index": 0,
+  "bounds": "0,0,1080,2400",
+  "children": [
+    {
+      "text": "",
+      "desc": "",
+      "viewId": "",
+      "className": "android.widget.TextView",
+      "clickable": true,
+      "editable": false,
+      "focused": false,
+      "enabled": true,
+      "depth": 1,
+      "index": 0,
+      "bounds": "0,0,100,100",
+      "children": []
+    }
+  ]
+}

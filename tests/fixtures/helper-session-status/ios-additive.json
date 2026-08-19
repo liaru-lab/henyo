@@ -1,0 +1,22 @@
+{
+  "type": "event",
+  "event": "session.ready",
+  "protocolVersion": 1,
+  "contractRevision": "remote-control.core/1.0.0",
+  "requiresAuth": false,
+  "serviceEpoch": "ios-epoch",
+  "deviceReady": true,
+  "deviceState": "ready",
+  "platform": {"name": "ios", "version": "27.0", "privateDetail": "drop-me"},
+  "capabilities": {
+    "profile": "remote-control.core/1",
+    "features": ["expectedServiceEpoch", "mutationOutcome", "futureFeature"],
+    "limits": {"inboundFrameBytes": 65536, "batchSteps": 64, "futureLimit": 9},
+    "operations": {
+      "screen.screenshot": {"mutates": false, "coordinateSpaces": ["screen", "screenshot"]},
+      "ui.tap": {"mutates": true},
+      "future.operation": {"mutates": false}
+    },
+    "privateDetail": "drop-me"
+  }
+}
