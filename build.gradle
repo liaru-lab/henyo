@@ -1,10 +1,9 @@
 import java.nio.file.Files
 
 def androidSdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
-def androidJar = System.getenv("HENYO_ANDROID_JAR") ?:
-        (androidSdkRoot ? "${androidSdkRoot}/platforms/android-30/android.jar" : "${projectDir}/sdk/android-11/android.jar")
 def compileAndroidJar = System.getenv("HENYO_COMPILE_ANDROID_JAR") ?:
         (androidSdkRoot ? "${androidSdkRoot}/platforms/android-35/android.jar" : "${projectDir}/sdk/android-35/android.jar")
+def resourceAndroidJar = System.getenv("HENYO_RESOURCE_ANDROID_JAR") ?: compileAndroidJar
 def appId = System.getenv("HENYO_APP_ID") ?: "link.liaru.henyo"
 def versionCode = findProperty("henyoVersionCode") ?: System.getenv("HENYO_VERSION_CODE") ?: "1"
 def versionName = findProperty("henyoVersionName") ?: System.getenv("HENYO_VERSION_NAME") ?: "0.1.0"
@@ -54,7 +53,7 @@ tasks.register("linkResources", Exec) {
         linkedApk.delete()
     }
     commandLine "aapt2", "link",
-            "-I", androidJar,
+            "-I", resourceAndroidJar,
             "--manifest", "src/main/AndroidManifest.xml",
             "--rename-manifest-package", appId,
             "--java", genDir.absolutePath,
@@ -218,6 +217,19 @@ tasks.register("verifySkillCheckoutDiscovery", Exec) {
     commandLine "python", "scripts/verify-skill-checkout-discovery.py"
 }
 
+tasks.register("verifySensitiveUiAccess", Exec) {
+    inputs.file("scripts/verify-bearer-token-auth.sh")
+    inputs.file("scripts/verify-sensitive-ui-access.py")
+    inputs.file("src/main/res/xml/accessibility_service_config.xml")
+    inputs.file("src/main/java/link/liaru/henyo/BearerTokenManager.java")
+    inputs.file("src/main/java/link/liaru/henyo/SensitiveUiAccessPolicy.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.file("src/main/java/link/liaru/henyo/MainActivity.java")
+    inputs.file("docs/ws-control-protocol.md")
+    inputs.file("docs/openapi.yaml")
+    commandLine "sh", "-c", "sh scripts/verify-bearer-token-auth.sh && python scripts/verify-sensitive-ui-access.py"
+}
+
 tasks.register("classesJar", Exec) {
     dependsOn "compileJava", "verifyPairingTotp", "verifyWebSocketProtocol"
     inputs.dir(classesDir)
@@ -229,7 +241,7 @@ tasks.register("classesJar", Exec) {
 }
 
 tasks.register("check") {
-    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery"
+    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
 }
 
 tasks.register("dex", Exec) {

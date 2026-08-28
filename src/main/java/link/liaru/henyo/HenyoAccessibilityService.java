@@ -88,6 +88,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final Object clientSocketsLock = new Object();
     private final Object controlExecutionLock = new Object();
     private final Object captureMappingsLock = new Object();
+    private final ThreadLocal<String> requestBearerToken = new ThreadLocal<>();
     private final PerformanceMetrics performanceMetrics = new PerformanceMetrics();
     private final LinkedHashMap<String, CaptureCoordinateMapping> captureMappings = new LinkedHashMap<>();
     private final ScheduledExecutorService uiTreeExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -390,7 +391,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 response = authPolicy(method, target, sourceClass, headers.get("authorization"), sourceAddress);
             }
             if (response == null) {
-                response = route(method, target, body);
+                requestBearerToken.set(bearerToken(headers.get("authorization")));
+                try {
+                    response = route(method, target, body);
+                } finally {
+                    requestBearerToken.remove();
+                }
             }
             byte[] responseBody = response.body;
             OutputStream out = socket.getOutputStream();
@@ -603,6 +609,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 return WsCallResult.error(id, "termux_permission_required",
                         "This paired client is not allowed to run Termux commands", elapsed(started));
             }
+        }
+        if (SensitiveUiAccessPolicy.protectsOperation(spec.op)
+                && !sensitiveUiAccessAllowed(session == null ? "" : session.sessionToken)) {
+            return WsCallResult.error(id, "sensitive_ui_permission_required",
+                    "This paired client is not allowed to access protected Android controls", elapsed(started));
         }
         String paramsJson = extractJsonMemberObject(frameText, "params");
         if (WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)) {
@@ -843,6 +854,20 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return verification;
     }
 
+    private boolean sensitiveUiAccessAllowed(String token) {
+        boolean pairedClient = token != null && !token.isEmpty();
+        boolean hasSensitiveScope = pairedClient
+                && tokens().hasActiveScope(token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL);
+        return SensitiveUiAccessPolicy.allows(activeWindowContainsSensitiveUi(), pairedClient, hasSensitiveScope);
+    }
+
+    private boolean mayReceiveSensitiveUi(String token) {
+        boolean pairedClient = token != null && !token.isEmpty();
+        boolean hasSensitiveScope = pairedClient
+                && tokens().hasActiveScope(token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL);
+        return SensitiveUiAccessPolicy.allows(true, pairedClient, hasSensitiveScope);
+    }
+
     private WsCallResult executeWsTermux(String id, String paramsJson, long started) {
         Map<String, String> params = parseJsonObject(paramsJson);
         String commandPath = params.getOrDefault("commandPath", params.getOrDefault("command", ""));
@@ -1031,6 +1056,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 session.sendText(snapshot.errorJson(settled, timedOut));
             }
             return true;
+        }
+        if (snapshot.sensitiveUi && session != null && !mayReceiveSensitiveUi(session.sessionToken)) {
+            return false;
         }
         if (session != null) {
             synchronized (session.writeLock) {
@@ -1225,6 +1253,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private UiTreeSnapshot captureUiTreeSnapshot(String reason, String actionId, Map<String, String> requestedParams) {
+        boolean sensitiveUi = activeWindowContainsSensitiveUi();
         long captureBeginEventSeq;
         long captureBeginElapsedRealtimeMs = SystemClock.elapsedRealtime();
         synchronized (uiTreeStateLock) {
@@ -1252,7 +1281,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String capturedAt = PairingSessionManager.instant(System.currentTimeMillis());
         if (!tree.status.startsWith("200 ")) {
             return UiTreeSnapshot.error(version, captureBeginEventSeq, captureEndEventSeq,
-                    captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, "tree_unavailable", serviceEpoch);
+                    captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, "tree_unavailable",
+                    serviceEpoch, sensitiveUi);
         }
         String currentJson = current != null && current.status.startsWith("200 ")
                 ? new String(current.body, StandardCharsets.UTF_8)
@@ -1261,7 +1291,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Map<String, String> treeMeta = parseJsonObject(treeBody);
         if (boolParam(treeMeta, "truncated", false)) {
             return UiTreeSnapshot.error(version, captureBeginEventSeq, captureEndEventSeq,
-                    captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, "tree_too_large", serviceEpoch);
+                    captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, "tree_too_large",
+                    serviceEpoch, sensitiveUi);
         }
         String treeJson = stripJsonObjectFields(treeBody, "ok");
         String currentJsonForDigest = stripJsonObjectFields(currentJson, "ok");
@@ -1269,7 +1300,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String treeDigest = digest(currentJsonForDigest + "|" + treeJsonForDigest);
         return UiTreeSnapshot.success(version, captureBeginEventSeq, captureEndEventSeq,
                 captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, actionId,
-                currentJson, treeJson, treeDigest, serviceEpoch);
+                currentJson, treeJson, treeDigest, serviceEpoch, sensitiveUi);
     }
 
     private synchronized String nextActionId() {
@@ -1405,6 +1436,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if ("POST".equals(method) && "/v1/auth/tokens/local".equals(path)) return localTokenCreate(body);
         if ("POST".equals(method) && "/v1/auth/tokens/import-local".equals(path)) return localTokenImport(body);
 
+        if (SensitiveUiAccessPolicy.protectsHttpPath(path)
+                && !sensitiveUiAccessAllowed(requestBearerToken.get())) {
+            return json(403, "{\"ok\":false,\"error\":\"sensitive_ui_permission_required\",\"code\":\"sensitive_ui_permission_required\"}");
+        }
+
         Map<String, String> params = parseJsonObject(body);
         params.putAll(queryParams);
         if ("GET".equals(method) && "/v1/health".equals(path)) return health();
@@ -1510,6 +1546,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private static Response authError(String code) {
         return json(401, "{\"ok\":false,\"error\":\"" + code + "\",\"code\":\"" + code +
                 "\",\"auth\":{\"required\":true,\"scheme\":\"Bearer\",\"sourceAllowed\":true}}");
+    }
+
+    private static String bearerToken(String authorization) {
+        BearerAuthPolicy.ParsedAuthorization parsed = BearerAuthPolicy.parse(authorization);
+        return parsed.status == BearerAuthPolicy.AUTH_PRESENT ? parsed.token : "";
     }
 
     private Response health() {
@@ -1725,6 +1766,32 @@ public class HenyoAccessibilityService extends AccessibilityService {
         } finally {
             root.recycle();
         }
+    }
+
+    private boolean activeWindowContainsSensitiveUi() {
+        if (Build.VERSION.SDK_INT < 34) return false;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return false;
+        try {
+            return nodeTreeContainsSensitiveUi(root, 0, new int[]{2000});
+        } finally {
+            root.recycle();
+        }
+    }
+
+    private boolean nodeTreeContainsSensitiveUi(AccessibilityNodeInfo node, int depth, int[] remaining) {
+        if (node == null || remaining[0]-- <= 0 || depth > 50) return false;
+        if (node.isAccessibilityDataSensitive()) return true;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            try {
+                if (nodeTreeContainsSensitiveUi(child, depth + 1, remaining)) return true;
+            } finally {
+                child.recycle();
+            }
+        }
+        return false;
     }
 
     private Response findTextResponse(Map<String, String> params) {
@@ -3358,11 +3425,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final String treeDigest;
         final String errorCode;
         final String serviceEpoch;
+        final boolean sensitiveUi;
 
         private UiTreeSnapshot(long treeVersion, long captureBeginEventSeq, long captureEndEventSeq,
                                long captureBeginElapsedRealtimeMs, long captureEndElapsedRealtimeMs,
                                String capturedAt, String reason, String actionId, String currentAppJson,
-                               String treeJson, String treeDigest, String errorCode, String serviceEpoch) {
+                               String treeJson, String treeDigest, String errorCode, String serviceEpoch,
+                               boolean sensitiveUi) {
             this.treeVersion = treeVersion;
             this.captureBeginEventSeq = captureBeginEventSeq;
             this.captureEndEventSeq = captureEndEventSeq;
@@ -3376,23 +3445,25 @@ public class HenyoAccessibilityService extends AccessibilityService {
             this.treeDigest = treeDigest == null ? "" : treeDigest;
             this.errorCode = errorCode == null ? "" : errorCode;
             this.serviceEpoch = serviceEpoch == null ? "" : serviceEpoch;
+            this.sensitiveUi = sensitiveUi;
         }
 
         static UiTreeSnapshot success(long treeVersion, long captureBeginEventSeq, long captureEndEventSeq,
                                       long captureBeginElapsedRealtimeMs, long captureEndElapsedRealtimeMs,
                                       String capturedAt, String reason, String actionId, String currentAppJson,
-                                      String treeJson, String treeDigest, String serviceEpoch) {
+                                      String treeJson, String treeDigest, String serviceEpoch, boolean sensitiveUi) {
             return new UiTreeSnapshot(treeVersion, captureBeginEventSeq, captureEndEventSeq,
                     captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, actionId,
-                    currentAppJson, treeJson, treeDigest, "", serviceEpoch);
+                    currentAppJson, treeJson, treeDigest, "", serviceEpoch, sensitiveUi);
         }
 
         static UiTreeSnapshot error(long treeVersion, long captureBeginEventSeq, long captureEndEventSeq,
                                     long captureBeginElapsedRealtimeMs, long captureEndElapsedRealtimeMs,
-                                    String capturedAt, String reason, String errorCode, String serviceEpoch) {
+                                    String capturedAt, String reason, String errorCode, String serviceEpoch,
+                                    boolean sensitiveUi) {
             return new UiTreeSnapshot(treeVersion, captureBeginEventSeq, captureEndEventSeq,
                     captureBeginElapsedRealtimeMs, captureEndElapsedRealtimeMs, capturedAt, reason, "", "{}", "{}", "",
-                    errorCode, serviceEpoch);
+                    errorCode, serviceEpoch, sensitiveUi);
         }
 
         boolean ok() {

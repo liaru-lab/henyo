@@ -6,4 +6,5 @@
     android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"
     android:description="@string/service_name"
+    android:isAccessibilityTool="true"
     android:notificationTimeout="50" />

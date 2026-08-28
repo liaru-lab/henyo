@@ -197,6 +197,13 @@ Termux execution. The Android app additionally needs Termux's
 `com.termux.permission.RUN_COMMAND` permission, and Termux must contain
 `allow-external-apps = true` in `~/.termux/termux.properties`.
 
+Clients also have a local-only **Allow protected Android controls** switch.
+It is off for new and existing clients. Enabling it requires confirmation on
+the Android device and grants that paired client the `sensitive-ui-control`
+scope. Remote clients cannot grant the scope to themselves. When Android marks
+the active UI as accessibility-sensitive, paired clients without the scope are
+denied while ordinary UI control remains unchanged.
+
 The remote access endpoint classes, pairing flow, and security model are
 summarized in:
 
