@@ -212,6 +212,12 @@ tasks.register("verifySafeDeploy", Exec) {
     commandLine "bash", "scripts/verify-safe-deploy.sh"
 }
 
+tasks.register("verifySkillCheckoutDiscovery", Exec) {
+    inputs.file("scripts/verify-skill-checkout-discovery.py")
+    inputs.file("skills/henyo-android-control/SKILL.md")
+    commandLine "python", "scripts/verify-skill-checkout-discovery.py"
+}
+
 tasks.register("classesJar", Exec) {
     dependsOn "compileJava", "verifyPairingTotp", "verifyWebSocketProtocol"
     inputs.dir(classesDir)
@@ -223,7 +229,7 @@ tasks.register("classesJar", Exec) {
 }
 
 tasks.register("check") {
-    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy"
+    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery"
 }
 
 tasks.register("dex", Exec) {
