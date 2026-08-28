@@ -124,6 +124,8 @@ run_case() {
         cd "$fixture/project"
         HOME="$fixture/home" \
         PATH="$fixture/bin:/data/data/com.termux/files/usr/bin" \
+        HENYO_VERSION_NAME="0.1.0" \
+        HENYO_VERSION_CODE="1" \
         DEPLOY_TEST_CASE="$case_name" \
         DEPLOY_TEST_LOG="$log" \
             scripts/deploy-android.sh --check-only
