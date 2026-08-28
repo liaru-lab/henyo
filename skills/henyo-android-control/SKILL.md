@@ -199,6 +199,15 @@ Do not infer permission for broader filesystem, package-management, process,
 network, or destructive commands from a successful probe. Command output can
 contain private device data; keep it bounded and do not expose unrelated data.
 
+## Protected Android Controls
+
+Android may mark some controls as accessibility-sensitive. A paired client
+cannot access those controls unless the user has enabled **Allow protected
+Android controls** for that client in Henyo's on-device UI. This local opt-in
+grants `sensitive-ui-control`; ordinary `control` does not imply it, and the
+client cannot grant it remotely. Treat `sensitive_ui_permission_required` as a
+hard stop and ask the user to review the named client on the Android device.
+
 ## Core Workflow
 
 1. Check service health:

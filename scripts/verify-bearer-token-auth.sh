@@ -39,6 +39,18 @@ public final class BearerTokenManagerVerifier {
         expect(manager.list().get(0).tokenHash.startsWith("sha256:"), true, "hash stored");
         expect(manager.list().get(0).hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND), false,
                 "Termux commands default disabled");
+        expect(manager.list().get(0).hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL), false,
+                "sensitive UI control default disabled");
+        expect(manager.hasActiveScope(created.token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL), false,
+                "sensitive UI access denied by default");
+        expect(manager.setScope(created.record.id, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL, true), true,
+                "sensitive UI scope enabled locally");
+        expect(manager.hasActiveScope(created.token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL), true,
+                "sensitive UI scope authorizes active token");
+        expect(manager.setScope(created.record.id, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL, false), true,
+                "sensitive UI scope disabled locally");
+        expect(manager.hasActiveScope(created.token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL), false,
+                "disabled sensitive UI scope takes effect immediately");
         expect(manager.setScope(created.record.id, BearerTokenManager.SCOPE_TERMUX_COMMAND, true), true,
                 "Termux command scope enabled locally");
         expect(manager.find(created.record.id).hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND), true,
@@ -61,6 +73,8 @@ public final class BearerTokenManagerVerifier {
         BearerTokenManager.Verification revoked = manager.verify(created.token, "100.64.0.9");
         expect(revoked.ok, false, "revoked token rejected");
         expect(revoked.revoked, true, "revoked token identified");
+        expect(manager.hasActiveScope(created.token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL), false,
+                "revoked token cannot use sensitive UI scope");
 
         expect(BearerTokenManager.constantTimeEquals("abc", "abc"), true, "constant-time equal");
         expect(BearerTokenManager.constantTimeEquals("abc", "abcd"), false, "constant-time unequal length");
@@ -74,6 +88,19 @@ public final class BearerTokenManagerVerifier {
         expect(BearerAuthPolicy.requiresRemoteBearer("POST", "/v1/termux/exec"), true, "remote Termux auth required");
         expect(BearerAuthPolicy.requiresRemoteBearer("GET", "/v1/health"), false, "remote health auth not required");
         expect(BearerAuthPolicy.requiresRemoteBearer("POST", "/v1/auth/tokens/local"), false, "local bootstrap not remote auth endpoint");
+
+        expect(SensitiveUiAccessPolicy.protectsOperation("ui.click"), true, "UI WS operation protected");
+        expect(SensitiveUiAccessPolicy.protectsOperation("screen.screenshot"), true, "screenshot WS operation protected");
+        expect(SensitiveUiAccessPolicy.protectsOperation("app.current"), false, "ordinary WS operation unchanged");
+        expect(SensitiveUiAccessPolicy.protectsHttpPath("/v1/ui/tree"), true, "v1 UI endpoint protected");
+        expect(SensitiveUiAccessPolicy.protectsHttpPath("/v1/screen/screenshot"), true, "v1 screenshot endpoint protected");
+        expect(SensitiveUiAccessPolicy.protectsHttpPath("/ui/tree"), true, "legacy UI endpoint protected");
+        expect(SensitiveUiAccessPolicy.protectsHttpPath("/screen/screenshot"), true, "legacy screenshot endpoint protected");
+        expect(SensitiveUiAccessPolicy.protectsHttpPath("/v1/app/current"), false, "ordinary HTTP endpoint unchanged");
+        expect(SensitiveUiAccessPolicy.allows(false, true, false), true, "ordinary UI remains available");
+        expect(SensitiveUiAccessPolicy.allows(true, false, false), true, "trusted local access remains available");
+        expect(SensitiveUiAccessPolicy.allows(true, true, false), false, "paired client denied by default");
+        expect(SensitiveUiAccessPolicy.allows(true, true, true), true, "locally authorized paired client allowed");
 
         System.out.println("bearer token manager verifier passed");
     }
@@ -227,6 +254,8 @@ javac -encoding UTF-8 -source 11 -target 11 \
   -d "$tmp" \
   src/main/java/link/liaru/henyo/BearerAuthPolicy.java \
   src/main/java/link/liaru/henyo/BearerTokenManager.java \
+  src/main/java/link/liaru/henyo/WsOperation.java \
+  src/main/java/link/liaru/henyo/SensitiveUiAccessPolicy.java \
   "$tmp/link/liaru/henyo/BearerTokenManagerVerifier.java"
 
 java -cp "$tmp:$android_jar" link.liaru.henyo.BearerTokenManagerVerifier

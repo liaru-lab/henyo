@@ -1,6 +1,7 @@
 package link.liaru.henyo;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
@@ -275,6 +276,24 @@ public class MainActivity extends Activity {
                 });
                 row.addView(termuxCommands);
 
+                Switch sensitiveUiControl = new Switch(this);
+                sensitiveUiControl.setText("Allow protected Android controls");
+                sensitiveUiControl.setChecked(record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL));
+                sensitiveUiControl.setOnCheckedChangeListener((button, enabled) -> {
+                    if (enabled && !record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL)) {
+                        confirmSensitiveUiControl(record);
+                        return;
+                    }
+                    BearerTokenManager manager = new BearerTokenManager(this);
+                    if (!manager.setScope(record.id, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL, false)) {
+                        showMessage("Could not update protected control permission for " + record.name);
+                    } else {
+                        showMessage("Disabled protected Android controls for " + record.name);
+                    }
+                    updateStatus();
+                });
+                row.addView(sensitiveUiControl);
+
                 Button revoke = new Button(this);
                 revoke.setText("Revoke " + record.name);
                 revoke.setOnClickListener((View v) -> {
@@ -294,11 +313,31 @@ public class MainActivity extends Activity {
         sb.append("\nScopes: ").append(joinComma(record.scopes));
         sb.append("\nTermux commands: ")
                 .append(record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND) ? "allowed" : "not allowed");
+        sb.append("\nProtected Android controls: ")
+                .append(record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL) ? "allowed" : "not allowed");
         sb.append("\nCreated: ").append(BearerTokenManager.instant(record.createdAt));
         if (record.lastUsedAt > 0) sb.append("\nLast used: ").append(BearerTokenManager.instant(record.lastUsedAt));
         if (!record.lastSourceAddress.isEmpty()) sb.append("\nLast source: ").append(record.lastSourceAddress);
         if (record.revokedAt > 0) sb.append("\nRevoked: ").append(BearerTokenManager.instant(record.revokedAt));
         return sb.toString();
+    }
+
+    private void confirmSensitiveUiControl(BearerTokenManager.TokenRecord record) {
+        new AlertDialog.Builder(this)
+                .setTitle("Allow protected Android controls?")
+                .setMessage("Allow " + record.name + " to interact with Android controls that the platform considers sensitive or protected. Only enable this for a client you trust.")
+                .setPositiveButton("Allow", (dialog, which) -> {
+                    BearerTokenManager manager = new BearerTokenManager(this);
+                    if (!manager.setScope(record.id, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL, true)) {
+                        showMessage("Could not update protected control permission for " + record.name);
+                    } else {
+                        showMessage("Enabled protected Android controls for " + record.name);
+                    }
+                    updateStatus();
+                })
+                .setNegativeButton("Cancel", (dialog, which) -> updateStatus())
+                .setOnCancelListener(dialog -> updateStatus())
+                .show();
     }
 
     private TextView sectionTitle(String text) {

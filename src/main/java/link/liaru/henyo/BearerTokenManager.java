@@ -20,6 +20,7 @@ final class BearerTokenManager {
     static final String SCOPE_CONTROL = "control";
     static final String SCOPE_TOKEN_MANAGEMENT = "token-management";
     static final String SCOPE_TERMUX_COMMAND = "termux-command";
+    static final String SCOPE_SENSITIVE_UI_CONTROL = "sensitive-ui-control";
     private static final String PREFS = "bearer_tokens";
     private static final String KEY_RECORDS = "records";
     private static final String HASH_PREFIX = "sha256:";
@@ -102,6 +103,17 @@ final class BearerTokenManager {
             }
         }
         return Verification.invalid();
+    }
+
+    synchronized boolean hasActiveScope(String token, String scope) {
+        if (token == null || token.isEmpty() || !isKnownScope(scope)) return false;
+        String candidateHash = hashToken(token);
+        for (TokenRecord record : loadRecords()) {
+            if (constantTimeEquals(candidateHash, record.tokenHash)) {
+                return !record.revoked && record.hasScope(scope);
+            }
+        }
+        return false;
     }
 
     synchronized List<TokenRecord> list() {
@@ -227,7 +239,8 @@ final class BearerTokenManager {
     private static boolean isKnownScope(String scope) {
         return SCOPE_CONTROL.equals(scope)
                 || SCOPE_TOKEN_MANAGEMENT.equals(scope)
-                || SCOPE_TERMUX_COMMAND.equals(scope);
+                || SCOPE_TERMUX_COMMAND.equals(scope)
+                || SCOPE_SENSITIVE_UI_CONTROL.equals(scope);
     }
 
     static String instant(long millis) {

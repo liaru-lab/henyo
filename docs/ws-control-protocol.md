@@ -38,6 +38,15 @@ model as authenticated HTTP control endpoints.
 - `termux.exec` is the exception: it always requires a non-revoked paired token
   whose local Android settings enable the `termux-command` capability, including
   on localhost. New tokens never receive this capability automatically.
+- Android UI that the platform marks as accessibility-sensitive requires a
+  non-revoked paired token whose on-device Henyo settings enable the
+  `sensitive-ui-control` capability. New and existing tokens do not receive
+  this capability automatically, and remote requests cannot grant it.
+- Token-less localhost compatibility remains locally trusted. A localhost
+  session that authenticates as a paired client follows that client's
+  `sensitive-ui-control` setting.
+- The same check applies to both `/v1/ui/*` and `/v1/screen/*` HTTP routes and
+  their temporary legacy `/ui/*` and `/screen/*` aliases.
 - For token-less remote sessions, the first successful `auth` frame switches the
   session to authenticated; all other control operations should return
   `auth_required` until that succeeds.
@@ -81,7 +90,9 @@ Errors:
 Standard codes include `bad_request`, `auth_required`, `auth_malformed`,
 `auth_invalid`, `auth_revoked`, `source_not_allowed`, `op_unknown`,
 `op_invalid`, `op_timeout`, `batch_timeout`, `accessibility_unavailable`, and
-`internal_error`.
+`internal_error`. `sensitive_ui_permission_required` means Android marked the
+active UI as accessibility-sensitive and the paired client lacks the local
+opt-in capability.
 
 ## Session Frames
 
