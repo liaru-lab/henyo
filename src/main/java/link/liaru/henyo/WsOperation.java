@@ -25,6 +25,7 @@ public final class WsOperation {
     public static final String OP_APP_CURRENT = "app.current";
     public static final String OP_APP_LIST = "app.list";
     public static final String OP_APP_LAUNCH = "app.launch";
+    public static final String OP_APP_OPEN_URI = "app.openUri";
     public static final String OP_APP_START = "app.start";
     public static final String OP_GLOBAL_BACK = "global.back";
     public static final String OP_GLOBAL_HOME = "global.home";
@@ -47,6 +48,7 @@ public final class WsOperation {
     public static final OperationSpec SPEC_APP_CURRENT = spec(OP_APP_CURRENT, "GET", "/v1/app/current", false);
     public static final OperationSpec SPEC_APP_LIST = spec(OP_APP_LIST, "WS", "app.list", false);
     public static final OperationSpec SPEC_APP_LAUNCH = spec(OP_APP_LAUNCH, "POST", "/v1/app/launch", false);
+    public static final OperationSpec SPEC_APP_OPEN_URI = spec(OP_APP_OPEN_URI, "WS", OP_APP_OPEN_URI, false);
     public static final OperationSpec SPEC_APP_START = spec(OP_APP_START, "POST", "/v1/app/start", false);
     public static final OperationSpec SPEC_GLOBAL_BACK = spec(OP_GLOBAL_BACK, "POST", "/v1/global/back", false);
     public static final OperationSpec SPEC_GLOBAL_HOME = spec(OP_GLOBAL_HOME, "POST", "/v1/global/home", false);
@@ -74,6 +76,7 @@ public final class WsOperation {
         ops.add(OP_APP_CURRENT);
         ops.add(OP_APP_LIST);
         ops.add(OP_APP_LAUNCH);
+        ops.add(OP_APP_OPEN_URI);
         ops.add(OP_APP_START);
         ops.add(OP_GLOBAL_BACK);
         ops.add(OP_GLOBAL_HOME);
@@ -98,6 +101,7 @@ public final class WsOperation {
         addSpec(specs, SPEC_APP_CURRENT);
         addSpec(specs, SPEC_APP_LIST);
         addSpec(specs, SPEC_APP_LAUNCH);
+        addSpec(specs, SPEC_APP_OPEN_URI);
         addSpec(specs, SPEC_APP_START);
         addSpec(specs, SPEC_GLOBAL_BACK);
         addSpec(specs, SPEC_GLOBAL_HOME);

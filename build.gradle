@@ -198,6 +198,14 @@ tasks.register("verifyResponseSemantics", Exec) {
     commandLine "python", "scripts/verify-response-semantics.py"
 }
 
+tasks.register("verifyOpenUriContract", Exec) {
+    inputs.file("scripts/verify-open-uri-contract.py")
+    inputs.file("src/main/java/link/liaru/henyo/OpenUriContract.java")
+    inputs.file("src/main/java/link/liaru/henyo/WsOperation.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    commandLine "python", "scripts/verify-open-uri-contract.py"
+}
+
 tasks.register("verifySafeDeploy", Exec) {
     inputs.file("scripts/deploy-android.sh")
     inputs.file("scripts/verify-safe-deploy.sh")
@@ -215,7 +223,7 @@ tasks.register("classesJar", Exec) {
 }
 
 tasks.register("check") {
-    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifySafeDeploy"
+    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy"
 }
 
 tasks.register("dex", Exec) {
