@@ -84,7 +84,7 @@ bin/henyo auth tokens
 ```
 
 Use the WebSocket helper path for normal observation and control: current app,
-UI tree, find/click/wait, text input, scrolling, app launch/start, global
+UI tree, find/click/wait, text input, scrolling, app launch/start/URI opening, global
 actions, and screenshots. The top-level CLI commands use WS by default:
 
 ```sh
@@ -95,6 +95,7 @@ bin/henyo apps
 bin/henyo apps --all
 bin/henyo click Battery --exact
 bin/henyo screenshot --json --ttl 300 --prefix ui-check
+bin/henyo open-uri 'example-app://resource/123' --intent "Opening the requested resource in an app"
 ```
 
 Treat HTTP v1 UI/control endpoints as compatibility/debug surfaces, not the
@@ -308,6 +309,30 @@ any
 ```
 
 Default matching is partial and `field=any`, which is useful for exploration but can produce false positives.
+
+## App URI Opening
+
+Use `open-uri` when the caller already has a complete absolute URI:
+
+```sh
+bin/henyo open-uri 'example-app://resource/123' \
+  --intent "Opening the requested resource in an app"
+```
+
+Add `--package` only when resolution must be pinned to a known app:
+
+```sh
+bin/henyo open-uri 'example-app://resource/123' \
+  --package com.example.app \
+  --intent "Opening the requested resource in the selected app"
+```
+
+Keep the URI as one quoted argv value. Do not re-encode it, shell-evaluate it,
+or include the raw URI in `--intent`. Henyo accepts custom schemes but rejects
+`file`, `content`, `javascript`, `data`, and `intent`. A successful dispatch
+does not prove an app-specific outcome. If a package was supplied, treat the
+returned `foreground` fact as independent verification and never retry merely
+because it is false.
 
 ## App Launching
 

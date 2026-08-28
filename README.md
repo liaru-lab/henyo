@@ -361,6 +361,7 @@ bin/henyo click Battery --exact
 bin/henyo click Battery --exact --intent 'Battery設定を開きます'
 bin/henyo wait Battery --exact --timeout 5000
 bin/henyo launch com.android.settings
+bin/henyo open-uri 'example-app://resource/123' --intent 'Opening the requested resource in an app'
 bin/henyo current
 bin/henyo back
 bin/henyo home
@@ -403,6 +404,23 @@ returns `completion_too_long` so the caller can rewrite it; accepted text is
 rendered in full and is never echoed in the response. See
 `docs/ws-control-protocol.md` and `docs/helper-ipc.md` for the exact helper
 contract.
+
+Open an opaque absolute URI through Android Activity resolution with:
+
+```sh
+bin/henyo open-uri 'example-app://resource/123' \
+  --intent 'Opening the requested resource in an app'
+bin/henyo open-uri 'example-app://resource/123' \
+  --package com.example.app \
+  --intent 'Opening the requested resource in the selected app'
+```
+
+The URI is preserved as one argument and is not interpreted or rewritten by
+Henyo. The package is optional; when present, Henyo never removes it for a
+fallback. Unknown custom schemes are allowed, while `file`, `content`,
+`javascript`, `data`, and `intent` are rejected as a generic security boundary.
+The raw URI is never echoed or logged. See `docs/ws-control-protocol.md` for the
+complete result and error contract.
 
 Every relevant accessibility change produces a lightweight `ui.dirty` event.
 The helper immediately invalidates both tree and current-app caches on that

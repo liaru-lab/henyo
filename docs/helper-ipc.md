@@ -303,6 +303,50 @@ For a batch object, top-level `display` from the JSON file is used when the CLI
 option is absent. Step objects are forwarded unchanged. Do not place secrets,
 message bodies, selectors, or raw input values in summaries.
 
+### Opening an opaque URI
+
+Use the generic call path for `app.openUri`:
+
+```json
+{
+  "cmd":"call",
+  "op":"app.openUri",
+  "params":{"uri":"example-app://resource/123"},
+  "display":{"summary":"Opening the requested resource in an app"}
+}
+```
+
+An optional package pins Android resolution without adding a fallback:
+
+```json
+{
+  "cmd":"call",
+  "op":"app.openUri",
+  "params":{
+    "uri":"example-app://resource/123",
+    "package":"com.example.app"
+  },
+  "display":{"summary":"Opening the requested resource in the selected app"}
+}
+```
+
+Equivalent CLI commands are:
+
+```sh
+bin/henyo open-uri 'example-app://resource/123' \
+  --intent 'Opening the requested resource in an app'
+bin/henyo open-uri 'example-app://resource/123' \
+  --package com.example.app \
+  --intent 'Opening the requested resource in the selected app'
+```
+
+The URI remains one argv/JSON string and is never shell-evaluated, rewritten,
+echoed, logged, cached, or replayed. `package` and `--intent` are optional.
+Unknown custom schemes are permitted, while `file`, `content`, `javascript`,
+`data`, and `intent` are rejected as a generic security boundary. With a
+package, the helper applies its existing independent foreground verification;
+without one, it does not invent an expected package.
+
 ## Task progress presentation
 
 Personal Assistant and other helper clients set an ordered ephemeral plan with:
@@ -395,7 +439,8 @@ multi-sentence final result. Do not route completion text through `current`,
 
 ### Applied mutation and failed verification
 
-For `app.launch` and `app.start`, inspect returned facts independently. A
+For `app.launch`, `app.start`, and package-targeted `app.openUri`, inspect
+returned facts independently. A
 top-level successful WS frame whose nested `result.ok` is true means dispatch
 was applied. The helper's nested `foreground` boolean is the separate bounded
 postcondition check. Thus `result.ok:true, foreground:false` is an applied

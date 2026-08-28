@@ -234,6 +234,15 @@ def verify_helper_forwarding():
         "steps": [{"text": "one", "status": "running"}],
     })
     assert invalid_status["error"] == "invalid_progress"
+    assert daemon.expected_package_for(
+        "app.openUri", {"uri": "example-app://resource/123"}
+    ) == ""
+    assert daemon.expected_package_for(
+        "app.openUri", {"uri": "example-app://resource/123", "package": "com.example.app"}
+    ) == "com.example.app"
+    assert daemon.batch_has_mutating_step([
+        {"id": "open", "op": "app.openUri", "params": {"uri": "example-app://resource/123"}},
+    ]) is True
     exact_completion = "🚀" * 125 + "界" * 125
     assert daemon.dispatch({"cmd": "completion.show", "message": exact_completion})["ok"] is True
     assert daemon.ws.completions[-1] == exact_completion
@@ -265,6 +274,11 @@ def verify_cli_forwarding():
             ]) == 0
             assert cli.main(["progress", "finish"]) == 0
             assert cli.main(["completion", "show", "完了しました。"]) == 0
+            assert cli.main([
+                "open-uri", "example-app://resource/123?q=one%20two&mode=test",
+                "--package", "com.example.app", "--intent", "Opening the requested resource",
+            ]) == 0
+            assert cli.main(["open-uri", "custom:value"]) == 0
         assert requests[0]["display"] == {"summary": "メッセージを送信します"}
         assert "display" not in requests[1]
         assert requests[1]["params"]["value"] == "private value"
@@ -281,6 +295,17 @@ def verify_cli_forwarding():
         }
         assert requests[4] == {"cmd": "progress.finish"}
         assert requests[5] == {"cmd": "completion.show", "message": "完了しました。"}
+        assert requests[6] == {
+            "cmd": "call", "op": "app.openUri",
+            "params": {
+                "uri": "example-app://resource/123?q=one%20two&mode=test",
+                "package": "com.example.app",
+            },
+            "display": {"summary": "Opening the requested resource"},
+        }
+        assert requests[7] == {
+            "cmd": "call", "op": "app.openUri", "params": {"uri": "custom:value"},
+        }
 
         with tempfile.TemporaryDirectory() as directory:
             batch_path = Path(directory) / "batch.json"

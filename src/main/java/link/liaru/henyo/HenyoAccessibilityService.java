@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.net.Uri;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -721,6 +722,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (WsOperation.OP_APP_LIST.equals(spec.op)) {
             return WsCallResult.ok(id, appList(parseJsonObject(paramsJson)), elapsed(started));
         }
+        if (WsOperation.OP_APP_OPEN_URI.equals(spec.op)) {
+            return executeWsOpenUri(id, paramsJson, started);
+        }
         if (WsOperation.OP_TERMUX_EXEC.equals(spec.op)) {
             return executeWsTermux(id, paramsJson, started);
         }
@@ -995,6 +999,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 || WsOperation.OP_UI_SCROLL.equals(spec.op)
                 || WsOperation.OP_UI_SCROLL_UNTIL.equals(spec.op)
                 || WsOperation.OP_APP_LAUNCH.equals(spec.op)
+                || WsOperation.OP_APP_OPEN_URI.equals(spec.op)
                 || WsOperation.OP_APP_START.equals(spec.op)
                 || WsOperation.OP_GLOBAL_BACK.equals(spec.op)
                 || WsOperation.OP_GLOBAL_HOME.equals(spec.op);
@@ -1911,6 +1916,56 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
     }
 
+    private WsCallResult executeWsOpenUri(String id, String paramsJson, long started) {
+        OpenUriParams params;
+        try {
+            params = parseOpenUriParams(paramsJson);
+        } catch (OpenUriParamException e) {
+            return WsCallResult.error(id, e.code, e.code, elapsed(started));
+        }
+
+        String uriError = OpenUriContract.validateUri(params.uri);
+        if (!uriError.isEmpty()) {
+            return WsCallResult.error(id, uriError, uriError, elapsed(started));
+        }
+        String packageError = OpenUriContract.validatePackage(params.packageName, params.packagePresent);
+        if (!packageError.isEmpty()) {
+            return WsCallResult.error(id, packageError, packageError, elapsed(started));
+        }
+
+        final Uri data;
+        try {
+            data = Uri.parse(params.uri);
+        } catch (RuntimeException e) {
+            return WsCallResult.error(id, "invalid_uri", "invalid_uri", elapsed(started));
+        }
+        if (data == null || !data.isAbsolute() || data.getScheme() == null) {
+            return WsCallResult.error(id, "invalid_uri", "invalid_uri", elapsed(started));
+        }
+
+        Intent intent = new Intent(Intent.ACTION_VIEW, data);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (params.packagePresent) intent.setPackage(params.packageName);
+
+        final ComponentName resolved;
+        try {
+            resolved = intent.resolveActivity(getPackageManager());
+        } catch (RuntimeException e) {
+            return WsCallResult.error(id, "no_matching_activity", "no_matching_activity", elapsed(started));
+        }
+        if (resolved == null) {
+            return WsCallResult.error(id, "no_matching_activity", "no_matching_activity", elapsed(started));
+        }
+
+        try {
+            startActivity(intent);
+            return WsCallResult.ok(id,
+                    "{\"ok\":true,\"resolved\":true,\"dispatched\":true}", elapsed(started));
+        } catch (RuntimeException e) {
+            return WsCallResult.error(id, "start_failed", "start_failed", elapsed(started));
+        }
+    }
+
     private Response appCurrent() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
@@ -2657,6 +2712,39 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
     }
 
+    private static OpenUriParams parseOpenUriParams(String json) {
+        JsonCursor cursor = new JsonCursor(json == null ? "" : json);
+        OpenUriParams params = new OpenUriParams();
+        cursor.skipWhitespace();
+        if (!cursor.consume('{')) throw new OpenUriParamException("missing_uri");
+        while (true) {
+            cursor.skipWhitespace();
+            if (cursor.consume('}')) break;
+            String key = cursor.readString();
+            if (key == null) throw new OpenUriParamException("invalid_uri");
+            cursor.skipWhitespace();
+            if (!cursor.consume(':')) throw new OpenUriParamException("invalid_uri");
+            cursor.skipWhitespace();
+            if ("uri".equals(key)) {
+                params.uriPresent = true;
+                params.uri = cursor.readString();
+                if (params.uri == null) throw new OpenUriParamException("invalid_uri");
+            } else if ("package".equals(key)) {
+                params.packagePresent = true;
+                params.packageName = cursor.readString();
+                if (params.packageName == null) throw new OpenUriParamException("invalid_package");
+            } else {
+                cursor.skipValue();
+            }
+            cursor.skipWhitespace();
+            if (cursor.consume(',')) continue;
+            if (cursor.consume('}')) break;
+            throw new OpenUriParamException("invalid_uri");
+        }
+        if (!params.uriPresent) throw new OpenUriParamException("missing_uri");
+        return params;
+    }
+
     private static String parseTaskCompletionMessage(String json) {
         JsonCursor cursor = new JsonCursor(json == null ? "" : json);
         cursor.skipWhitespace();
@@ -3187,6 +3275,22 @@ public class HenyoAccessibilityService extends AccessibilityService {
         ClickResult(boolean ok, String strategy) {
             this.ok = ok;
             this.strategy = strategy;
+        }
+    }
+
+    private static final class OpenUriParams {
+        String uri;
+        boolean uriPresent;
+        String packageName;
+        boolean packagePresent;
+    }
+
+    private static final class OpenUriParamException extends IllegalArgumentException {
+        final String code;
+
+        OpenUriParamException(String code) {
+            super(code);
+            this.code = code;
         }
     }
 
