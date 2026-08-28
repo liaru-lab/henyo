@@ -485,6 +485,7 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 | `app.current` | `GET /v1/app/current` | none | Existing current-app payload |
 | `app.list` | WS only | `all` | Launcher apps by default; installed package list when `all:true` |
 | `app.launch` | `POST /v1/app/launch` | `package` | Existing launch payload |
+| `app.openUri` | WS only | required `uri`; optional `package` | Resolve and dispatch one validated opaque URI with `ACTION_VIEW` |
 | `app.start` | `POST /v1/app/start` | `component` | Existing start payload |
 | `global.back` | `POST /v1/global/back` | none | Existing global-action payload |
 | `global.home` | `POST /v1/global/home` | none | Existing global-action payload |
@@ -493,6 +494,53 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 | `task.progress.set` | WS only | structured full snapshot: `goal`, ordered `steps[{text,status}]`, optional `replan`; or legacy `goal`, `completed`, `current` | Presentation application acknowledgement; never echoes text |
 | `task.progress.finish` | WS only | none | Idempotent presentation clear acknowledgement |
 | `task.completion.show` | WS only | required `message` string, 1–250 Unicode code points | Replace-only completion presentation acknowledgement; never echoes text |
+
+### Opening an opaque URI
+
+`app.openUri` dispatches an absolute URI through one Android `ACTION_VIEW`
+Intent. It is intentionally WS-only and has no HTTP v1 endpoint:
+
+```json
+{
+  "type":"call",
+  "id":"open-1",
+  "op":"app.openUri",
+  "params":{
+    "uri":"example-app://resource/123",
+    "package":"com.example.app"
+  },
+  "display":{"summary":"Opening the requested resource in the selected app"}
+}
+```
+
+`uri` is a required non-empty absolute URI of at most 2,048 Unicode code
+points. Henyo accepts unknown custom schemes and does not maintain an
+application-specific allowlist. As a generic remote-control security boundary,
+the `file`, `content`, `javascript`, `data`, and `intent` schemes are rejected
+case-insensitively with `disallowed_uri_scheme`.
+
+Henyo treats every accepted URI as opaque. It does not re-encode, rewrite,
+interpret, echo, log, persist, cache, or replay the URI. The original string is
+passed through `Uri.parse()` to `Intent.setData()`.
+
+`package` is optional for every scheme. When supplied, it must be a valid
+Android package name and is applied with `Intent.setPackage()`. Henyo never
+removes it to retry against another Activity. When omitted, normal Android
+Activity resolution applies. Henyo resolves before dispatch and calls
+`startActivity()` at most once.
+
+A successful frame means only that an Activity resolved and dispatch returned
+without throwing:
+
+```json
+{"type":"result","id":"open-1","ok":true,"result":{"ok":true,"resolved":true,"dispatched":true},"durationMs":12}
+```
+
+Stable failure codes are `missing_uri`, `uri_too_long`, `invalid_uri`,
+`disallowed_uri_scheme`, `invalid_package`, `no_matching_activity`, and
+`start_failed`. Error frames never contain the URI or an internal exception
+message. The optional top-level `display.summary` uses the existing
+presentation-only operation caption and cannot affect dispatch or results.
 
 Example approved Termux execution:
 
@@ -510,7 +558,8 @@ tree snapshot means rendering is complete.
 ### Mutation application versus verification
 
 Operation dispatch and postcondition verification remain distinct facts. For
-example, a helper `app.launch` response with top-level `ok:true` and nested
+example, a helper `app.launch` or package-targeted `app.openUri` response with
+top-level `ok:true` and nested
 `result.ok:true` means Android accepted the launch mutation. The helper then
 adds `result.foreground:true|false`; `foreground:false` means the requested
 package was not verified before the bounded deadline, not that the already
