@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Henyo Change"
+  short_description: "Deliver public Henyo changes safely"
+  default_prompt: "Use $manage-henyo-change to take this Henyo change from a public-safe Issue through verified squash merge."
