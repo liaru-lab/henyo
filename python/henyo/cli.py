@@ -542,6 +542,32 @@ def apps(argv: List[str], display: Dict[str, str] | None = None) -> int:
     return control_call("app.list", {"all": all_apps}, display)
 
 
+def open_uri(argv: List[str], display: Dict[str, str] | None = None) -> int:
+    uri: str | None = None
+    package: str | None = None
+    i = 0
+    while i < len(argv):
+        value = argv[i]
+        if value == "--package":
+            i += 1
+            if i >= len(argv):
+                raise SystemExit("--package requires a package name")
+            package = argv[i]
+        elif value.startswith("--"):
+            raise SystemExit(f"unknown open-uri option: {value}")
+        elif uri is None:
+            uri = value
+        else:
+            raise SystemExit("open-uri requires exactly one URI")
+        i += 1
+    if uri is None:
+        raise SystemExit("open-uri requires a URI")
+    params = {"uri": uri}
+    if package is not None:
+        params["package"] = package
+    return control_call("app.openUri", params, display)
+
+
 def helper_cmd(argv: List[str]) -> int:
     sub = argv[0] if argv else "status"
     socket_path = helper.default_socket_path()
@@ -820,6 +846,7 @@ def usage() -> None:
   henyo termux exec [--workdir PATH] [--stdin TEXT] [--timeout MS] -- COMMAND [ARG ...]
   henyo chrome cdp prepare [--adb SERIAL] [--port PORT] [--package PACKAGE] [--socket NAME] [--timeout MS] [--include-targets]
   henyo apps [--all]
+  henyo open-uri URI [--package PACKAGE] [--intent TEXT]
   henyo health
   henyo v1 health|tree|observe|find|click|current|back|home|screenshot ...
   henyo tree [DEPTH] [--fresh] [--max-age MS]
@@ -841,7 +868,7 @@ def main(argv=None) -> int:
     if cmd in {
         "apps", "tree", "current", "observe", "find", "click", "wait", "wait-gone",
         "set", "tap", "swipe", "scroll", "scroll-until", "launch", "start", "back",
-        "home", "screenshot", "batch",
+        "home", "screenshot", "batch", "open-uri",
     }:
         rest, display = intent_options(rest)
     if cmd == "helper":
@@ -923,6 +950,8 @@ def main(argv=None) -> int:
         return print_json(json.loads(http_request("GET", "/v1/health").decode()))
     if cmd == "apps":
         return apps(rest, display)
+    if cmd == "open-uri":
+        return open_uri(rest, display)
     if cmd == "tree":
         return tree(rest, display)
     if cmd == "observe":

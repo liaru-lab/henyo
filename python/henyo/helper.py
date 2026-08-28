@@ -60,7 +60,7 @@ KNOWN_CAPABILITY_LIMITS = frozenset({
 KNOWN_CAPABILITY_OPERATIONS = frozenset({
     "ui.tree", "ui.find", "ui.click", "ui.setText", "ui.tap", "ui.swipe",
     "ui.scroll", "ui.scrollUntil", "ui.wait", "ui.observe",
-    "app.current", "app.list", "app.launch", "app.start", "app.activate",
+    "app.current", "app.list", "app.launch", "app.openUri", "app.start", "app.activate",
     "global.back", "global.home", "screen.screenshot", "termux.exec",
     "input.text", "input.key", "task.progress.set", "task.progress.finish",
     "task.completion.show", "session.wakeHint",
@@ -442,6 +442,7 @@ BATCH_MUTATING_OPS = frozenset({
     "ui.scroll",
     "ui.scrollUntil",
     "app.launch",
+    "app.openUri",
     "app.start",
     "global.back",
     "global.home",
@@ -1215,7 +1216,7 @@ class HelperDaemon:
                 self.cache["expectedPackage"] = ""
 
     def expected_package_for(self, op: str, params: Dict[str, Any]) -> str:
-        if op == "app.launch":
+        if op in ("app.launch", "app.openUri"):
             value = params.get("package")
             return value if isinstance(value, str) else ""
         if op == "app.start":
