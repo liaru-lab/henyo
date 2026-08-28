@@ -14,9 +14,14 @@ device's default credential profile.
 
 ## Location
 
-Resolve the Henyo repository root as two directory levels above the directory
-containing this `SKILL.md`. Run commands from that repository root and invoke
-the CLI as `bin/henyo` unless there is a reason not to.
+Resolve the real path of this `SKILL.md`. If that path is inside a Henyo source
+checkout, use the containing repository root. A separately installed copy of
+this skill does not identify a checkout by its relative location; use the
+Henyo checkout supplied by the host or user, or the current workspace when it
+is a Henyo checkout. Require the selected root to contain `bin/henyo`. If more
+than one valid checkout remains and the intended one is ambiguous, ask the
+user instead of choosing one. Run commands from the selected repository root
+and invoke the CLI as `bin/henyo` unless there is a reason not to.
 
 For direct Tailnet access from another machine, enable remote access in Henyo
 MainActivity, start pairing on the Android screen, then register and save a
