@@ -5,9 +5,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.ComposeShader;
 import android.graphics.LinearGradient;
-import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
@@ -1037,9 +1035,8 @@ final class ConnectionStatusOverlay {
         private final Paint activityShadePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint activityGridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint caretPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint scanGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint scanGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint scanCorePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Matrix scanMaskMatrix = new Matrix();
         private final Paint gloveBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint gloveGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1070,8 +1067,9 @@ final class ConnectionStatusOverlay {
         private Shader activityShadeShader;
         private Shader progressActivityShadeShader;
         private Shader activityGridShader;
-        private Shader scanVerticalMaskShader;
-        private int scanShaderWidth = -1;
+        private Bitmap scanGlowBitmap;
+        private int scanBitmapWidth = -1;
+        private int scanBitmapHeight = -1;
         private Shader completionActivityShadeShader;
         private int progressShadeWidth = -1;
         private int progressShadeHeight = -1;
@@ -1173,6 +1171,7 @@ final class ConnectionStatusOverlay {
         @Override
         protected void onDetachedFromWindow() {
             recycleTargetGlowBitmap();
+            recycleScanGlowBitmap();
             super.onDetachedFromWindow();
         }
 
@@ -1626,40 +1625,60 @@ final class ConnectionStatusOverlay {
             if (attenuation <= 0f) return;
             float edgeFade = Math.min(1f, Math.min(position * 7f, (1f - position) * 7f));
             int alpha = Math.round(attenuation * edgeFade * 255f);
-            ensureScanShader(width);
-            float halfGlow = 18f * density;
-            scanMaskMatrix.setTranslate(0f, y);
-            scanVerticalMaskShader.setLocalMatrix(scanMaskMatrix);
+            ensureScanGlowBitmap(width);
             scanGlowPaint.setAlpha(Math.round(alpha * 0.58f));
             scanCorePaint.setAlpha(Math.round(alpha * 0.92f));
             float inset = 18f * density;
-            canvas.drawRect(inset, y - halfGlow, width - inset, y + halfGlow, scanGlowPaint);
+            if (scanGlowBitmap != null) {
+                canvas.drawBitmap(scanGlowBitmap, inset,
+                        y - scanGlowBitmap.getHeight() * 0.5f, scanGlowPaint);
+            }
             canvas.drawLine(inset, y, width - inset, y, scanCorePaint);
         }
 
-        private void ensureScanShader(int width) {
-            if (scanShaderWidth == width && scanVerticalMaskShader != null) return;
-            scanShaderWidth = width;
-            float inset = 18f * density;
-            Shader horizontal = new LinearGradient(inset, 0f, width - inset, 0f,
+        private void ensureScanGlowBitmap(int viewWidth) {
+            int inset = Math.max(0, Math.round(18f * density));
+            int width = Math.max(1, viewWidth - inset * 2);
+            int height = Math.max(3, Math.round(36f * density));
+            if (scanGlowBitmap != null && scanBitmapWidth == width
+                    && scanBitmapHeight == height) return;
+            recycleScanGlowBitmap();
+            int[] pixels;
+            try {
+                scanGlowBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                pixels = new int[Math.multiplyExact(width, height)];
+            } catch (RuntimeException | OutOfMemoryError ignored) {
+                recycleScanGlowBitmap();
+                return;
+            }
+            for (int row = 0; row < height; row++) {
+                int alpha = Math.round(255f * TargetGlowModel.scanFadeAlpha(
+                        (row + 0.5f) / height));
+                for (int column = 0; column < width; column++) {
+                    int color = TargetGlowModel.gradientColor(
+                            width <= 1 ? 0f : column / (float) (width - 1));
+                    pixels[row * width + column] = (alpha << 24) | (color & 0x00ffffff);
+                }
+            }
+            scanGlowBitmap.setPixels(pixels, 0, width, 0, 0, width, height);
+            scanBitmapWidth = width;
+            scanBitmapHeight = height;
+            float left = 18f * density;
+            scanCorePaint.setShader(new LinearGradient(left, 0f, viewWidth - left, 0f,
                     new int[]{
                             Color.rgb(67, 210, 196),
                             Color.rgb(92, 154, 222),
                             Color.rgb(157, 126, 204),
                             Color.rgb(67, 210, 196)
-                    }, new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP);
-            float halfGlow = 18f * density;
-            scanVerticalMaskShader = new LinearGradient(0f, -halfGlow, 0f, halfGlow,
-                    new int[]{
-                            Color.TRANSPARENT,
-                            Color.argb(72, 255, 255, 255),
-                            Color.WHITE,
-                            Color.argb(72, 255, 255, 255),
-                            Color.TRANSPARENT
-                    }, new float[]{0f, 0.27f, 0.5f, 0.73f, 1f}, Shader.TileMode.CLAMP);
-            scanGlowPaint.setShader(new ComposeShader(
-                    horizontal, scanVerticalMaskShader, PorterDuff.Mode.DST_IN));
-            scanCorePaint.setShader(horizontal);
+                    }, new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP));
+        }
+
+        private void recycleScanGlowBitmap() {
+            Bitmap bitmap = scanGlowBitmap;
+            scanGlowBitmap = null;
+            scanBitmapWidth = -1;
+            scanBitmapHeight = -1;
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
         }
 
         private void drawGlove(Canvas canvas, long now, AgentVisualModel.CursorFrame frame) {

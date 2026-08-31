@@ -18,6 +18,14 @@ public final class TargetGlowModelTest {
         expect(TargetGlowModel.innerGlowAlpha(15f, 30f) > 0f
                         && TargetGlowModel.innerGlowAlpha(15f, 30f) < 1f,
                 "inner glow fades continuously");
+        expect(TargetGlowModel.scanFadeAlpha(0.5f) > 0.99f,
+                "scan glow peaks at its core");
+        expect(TargetGlowModel.scanFadeAlpha(0f) < 0.01f
+                        && TargetGlowModel.scanFadeAlpha(1f) < 0.01f,
+                "scan glow fades out symmetrically at both edges");
+        expect(close(TargetGlowModel.scanFadeAlpha(0.25f),
+                        TargetGlowModel.scanFadeAlpha(0.75f)),
+                "scan glow is vertically symmetric");
         expect(TargetGlowModel.gradientColor(0f) == 0xff43d2c4,
                 "gradient begins with cyan");
         expect(TargetGlowModel.gradientColor(1f) == 0xff43d2c4,

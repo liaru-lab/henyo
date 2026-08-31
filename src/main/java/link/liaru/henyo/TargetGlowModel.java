@@ -36,6 +36,11 @@ final class TargetGlowModel {
         return 1f - x * x * (3f - 2f * x);
     }
 
+    static float scanFadeAlpha(float normalizedPosition) {
+        float distanceFromCenter = Math.abs(clamp(normalizedPosition) - 0.5f) * 2f;
+        return 1f - smooth(distanceFromCenter);
+    }
+
     static int gradientColor(float position) {
         float value = clamp(position);
         int index = 0;
