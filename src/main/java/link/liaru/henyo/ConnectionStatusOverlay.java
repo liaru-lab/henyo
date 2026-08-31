@@ -5,7 +5,9 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ComposeShader;
 import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
@@ -723,6 +725,7 @@ final class ConnectionStatusOverlay {
     /** Geometry is controller-owned so screenshot detach/restore preserves motion. */
     private static final class TargetVisualState {
         final Rect bounds = new Rect();
+        final Rect contourBounds = new Rect();
         final Region presentationRegion = new Region();
         final Path outline = new Path();
         final Path presentationClip = new Path();
@@ -744,16 +747,21 @@ final class ConnectionStatusOverlay {
             displayId = newDisplayId;
             bounds.set(newBounds);
             presentationRegion.set(newRegion);
+            contourBounds.set(presentationRegion.getBounds());
             displayWidth = newDisplayWidth;
             displayHeight = newDisplayHeight;
             density = Math.max(0.5f, newDensity);
-            valid = windowId >= 0 && !bounds.isEmpty() && !presentationRegion.isEmpty();
+            valid = windowId >= 0 && !bounds.isEmpty() && !contourBounds.isEmpty()
+                    && !presentationRegion.isEmpty();
             outline.reset();
             presentationClip.reset();
             if (valid) {
+                // A full-span title/status/navigation strip can remove one target edge.
+                // Anchor the contour to the remaining presentation bounds so that edge
+                // moves beside the visible client area instead of disappearing under chrome.
                 float radius = Math.min(14f * density,
-                        Math.min(bounds.width(), bounds.height()) * 0.08f);
-                outline.addRoundRect(new RectF(bounds), radius, radius, Path.Direction.CW);
+                        Math.min(contourBounds.width(), contourBounds.height()) * 0.08f);
+                outline.addRoundRect(new RectF(contourBounds), radius, radius, Path.Direction.CW);
                 presentationRegion.getBoundaryPath(presentationClip);
             }
             generation++;
@@ -763,6 +771,7 @@ final class ConnectionStatusOverlay {
             valid = false;
             windowId = -1;
             bounds.setEmpty();
+            contourBounds.setEmpty();
             presentationRegion.setEmpty();
             outline.reset();
             presentationClip.reset();
@@ -1028,8 +1037,9 @@ final class ConnectionStatusOverlay {
         private final Paint activityShadePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint activityGridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint caretPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint scanPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint scanGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint scanCorePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Matrix scanMaskMatrix = new Matrix();
         private final Paint gloveBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint gloveGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1060,6 +1070,8 @@ final class ConnectionStatusOverlay {
         private Shader activityShadeShader;
         private Shader progressActivityShadeShader;
         private Shader activityGridShader;
+        private Shader scanVerticalMaskShader;
+        private int scanShaderWidth = -1;
         private Shader completionActivityShadeShader;
         private int progressShadeWidth = -1;
         private int progressShadeHeight = -1;
@@ -1117,12 +1129,9 @@ final class ConnectionStatusOverlay {
             activityGridPaint.setColor(BACKGROUND_NAVY_LIFTED);
             activityGridPaint.setStyle(Paint.Style.STROKE);
             activityGridPaint.setStrokeWidth(Math.max(1f, 0.7f * density));
-            scanPaint.setColor(TEXT_GLOW);
-            scanPaint.setStrokeWidth(8f * density);
-            scanPaint.setStrokeCap(Paint.Cap.ROUND);
-            scanPaint.setShadowLayer(10f * density, 0f, 0f, TEXT_GLOW);
-            scanCorePaint.setColor(Color.rgb(174, 255, 255));
-            scanCorePaint.setStrokeWidth(Math.max(1f, 1.2f * density));
+            scanGlowPaint.setStyle(Paint.Style.FILL);
+            scanCorePaint.setStrokeWidth(Math.max(1.5f, 2f * density));
+            scanCorePaint.setStrokeCap(Paint.Cap.ROUND);
             pointGloveBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.agent_glove_point);
             swipeGloveBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.agent_glove_swipe);
             backGloveBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.agent_glove_back);
@@ -1284,7 +1293,7 @@ final class ConnectionStatusOverlay {
 
         private void drawTargetWindowGlow(Canvas canvas, long now) {
             if (!targetVisualState.valid || !visualModel.isActivityVisible(now)) return;
-            Rect bounds = targetVisualState.bounds;
+            Rect bounds = targetVisualState.contourBounds;
             if (bounds.isEmpty()) return;
             float depth = TargetGlowModel.depthPx(bounds.width(), bounds.height(),
                     targetVisualState.density);
@@ -1321,7 +1330,7 @@ final class ConnectionStatusOverlay {
         }
 
         private void ensureTargetGlowBitmap(float depth) {
-            Rect bounds = targetVisualState.bounds;
+            Rect bounds = targetVisualState.contourBounds;
             if (targetGlowBitmapGeneration == targetVisualState.generation
                     && targetGlowBitmap != null
                     && targetGlowBitmap.getWidth() == bounds.width()
@@ -1617,11 +1626,40 @@ final class ConnectionStatusOverlay {
             if (attenuation <= 0f) return;
             float edgeFade = Math.min(1f, Math.min(position * 7f, (1f - position) * 7f));
             int alpha = Math.round(attenuation * edgeFade * 255f);
-            scanPaint.setAlpha(Math.round(alpha * 0.20f));
-            scanCorePaint.setAlpha(Math.round(alpha * 0.72f));
+            ensureScanShader(width);
+            float halfGlow = 18f * density;
+            scanMaskMatrix.setTranslate(0f, y);
+            scanVerticalMaskShader.setLocalMatrix(scanMaskMatrix);
+            scanGlowPaint.setAlpha(Math.round(alpha * 0.58f));
+            scanCorePaint.setAlpha(Math.round(alpha * 0.92f));
             float inset = 18f * density;
-            canvas.drawLine(inset, y, width - inset, y, scanPaint);
+            canvas.drawRect(inset, y - halfGlow, width - inset, y + halfGlow, scanGlowPaint);
             canvas.drawLine(inset, y, width - inset, y, scanCorePaint);
+        }
+
+        private void ensureScanShader(int width) {
+            if (scanShaderWidth == width && scanVerticalMaskShader != null) return;
+            scanShaderWidth = width;
+            float inset = 18f * density;
+            Shader horizontal = new LinearGradient(inset, 0f, width - inset, 0f,
+                    new int[]{
+                            Color.rgb(67, 210, 196),
+                            Color.rgb(92, 154, 222),
+                            Color.rgb(157, 126, 204),
+                            Color.rgb(67, 210, 196)
+                    }, new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP);
+            float halfGlow = 18f * density;
+            scanVerticalMaskShader = new LinearGradient(0f, -halfGlow, 0f, halfGlow,
+                    new int[]{
+                            Color.TRANSPARENT,
+                            Color.argb(72, 255, 255, 255),
+                            Color.WHITE,
+                            Color.argb(72, 255, 255, 255),
+                            Color.TRANSPARENT
+                    }, new float[]{0f, 0.27f, 0.5f, 0.73f, 1f}, Shader.TileMode.CLAMP);
+            scanGlowPaint.setShader(new ComposeShader(
+                    horizontal, scanVerticalMaskShader, PorterDuff.Mode.DST_IN));
+            scanCorePaint.setShader(horizontal);
         }
 
         private void drawGlove(Canvas canvas, long now, AgentVisualModel.CursorFrame frame) {
