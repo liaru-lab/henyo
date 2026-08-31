@@ -219,10 +219,12 @@ docs/ws-control-protocol.md
 ```
 
 While at least one authenticated WebSocket control session is connected, Henyo
-draws a restrained dark-navy and cyan inward glow from the top edge using the
-app icon's palette. A control call or batch expands it into a translucent
-whole-display inner glow with soft cyan corner pulses. Recent activity holds
-for 20 seconds and then fades over 1.8 seconds, bridging slower agent pauses
+draws a restrained dark-navy and cyan indicator using the app icon's palette.
+A control call or batch expands it into a translucent inward glow around the
+resolved target window on that window's display. The contour follows the safe
+presentation bounds, clips around occluding overlays, and moves beside task
+chrome when an edge cannot be drawn over directly. Recent activity holds for
+20 seconds and then fades over 1.8 seconds, bridging slower agent pauses
 instead of repeatedly collapsing. The first activation and any fade reversal
 ease into one uptime-based pulse; a new call extends the lease without resetting
 the pulse phase. The lower navy shade shares that lease, so it is already present
@@ -249,9 +251,11 @@ double-stacks a stale plan. Completion text is ephemeral and is not echoed,
 logged, persisted, cached, included in diagnostics, or replayed.
 
 Tree, find, wait, screenshot, and combined observation calls add one restrained
-cyan scan from the top of the display toward the bottom. Internal observation
-retries and post-action settling do not restart it. Manipulative actions share
-one persistent 58dp Henyo glove cursor. Its first session position is the screen
+cyan-to-blue-to-violet scan from the top of the display toward the bottom. A
+thin bright core is surrounded by a smooth vertical fade instead of a stacked
+line shadow. Internal observation retries and post-action settling do not
+restart it. Manipulative actions share one persistent 58dp Henyo glove cursor.
+Its first session position is the screen
 centre; later actions travel from the retained wrist position to their real
 target over a distance-based 180–450ms ease before the operation executes.
 Every move uses the pointing pose. At the action start it switches to the one
