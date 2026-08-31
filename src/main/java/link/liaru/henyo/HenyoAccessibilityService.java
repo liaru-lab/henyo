@@ -91,8 +91,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final Object controlExecutionLock = new Object();
     private final Object captureMappingsLock = new Object();
     private final ThreadLocal<String> requestBearerToken = new ThreadLocal<>();
+    private final ThreadLocal<String> requestTargetContextId = new ThreadLocal<>();
     private final PerformanceMetrics performanceMetrics = new PerformanceMetrics();
     private final LinkedHashMap<String, CaptureCoordinateMapping> captureMappings = new LinkedHashMap<>();
+    private final TargetHistoryStore targetHistoryStore = new TargetHistoryStore();
     private final ScheduledExecutorService uiTreeExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "henyo-ui-tree");
         thread.setDaemon(true);
@@ -119,6 +121,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private volatile String lastObservedClassName = "";
     private volatile int preferredTargetWindowId = -1;
     private volatile int preferredTargetDisplayId = Display.DEFAULT_DISPLAY;
+    private volatile String lastTargetContextId = "local";
     private long treeVersion;
     private long actionSeq;
     private volatile String serviceEpoch = "";
@@ -137,6 +140,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         synchronized (captureMappingsLock) {
             captureMappings.clear();
         }
+        targetHistoryStore.clearAll();
         bearerTokens = new BearerTokenManager(this);
         connectionStatusOverlay = new ConnectionStatusOverlay(this, performanceMetrics);
         tailscaleWatchdog = new TailscaleWatchdog(this);
@@ -154,6 +158,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 && event.getWindowId() >= 0) {
             preferredTargetWindowId = event.getWindowId();
             if (Build.VERSION.SDK_INT >= 30) preferredTargetDisplayId = event.getDisplayId();
+            if (isTargetHistoryEvent(event.getEventType())) {
+                recordTargetHint(lastTargetContextId, eventPackage, event.getWindowId(),
+                        Build.VERSION.SDK_INT >= 30 ? event.getDisplayId() : Display.DEFAULT_DISPLAY);
+            }
         }
         UiEventClassification classification = classifyUiEvent(event);
         if (classification.kind == UI_EVENT_NOISE) {
@@ -192,6 +200,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     @Override
     public void onInterrupt() {
+    }
+
+    private static boolean isTargetHistoryEvent(int eventType) {
+        return eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
+                || eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED
+                || eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END;
     }
 
     @Override
@@ -401,11 +416,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 response = authPolicy(method, target, sourceClass, headers.get("authorization"), sourceAddress);
             }
             if (response == null) {
-                requestBearerToken.set(bearerToken(headers.get("authorization")));
+                String token = bearerToken(headers.get("authorization"));
+                requestBearerToken.set(token);
+                requestTargetContextId.set(targetContextIdForToken(token));
                 try {
                     response = route(method, target, body);
                 } finally {
                     requestBearerToken.remove();
+                    requestTargetContextId.remove();
                 }
             }
             byte[] responseBody = response.body;
@@ -492,6 +510,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         session.sessionTokenId = sessionTokenId;
         session.sessionToken = sessionToken;
         registerWsSession(session);
+        attachTargetHistory(session);
         try {
             session.sendText("{\"type\":\"event\",\"event\":\"session.ready\",\"protocolVersion\":1,\"requiresAuth\":" +
                     !authenticated + ",\"serviceEpoch\":\"" + escape(serviceEpoch) + "\"}");
@@ -539,6 +558,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         session.authenticated = true;
                         session.sessionToken = sessionToken;
                         session.sessionTokenId = verification.record.id;
+                        attachTargetHistory(session);
                         session.touchControlActivity();
                         refreshConnectionStatusOverlay();
                         session.sendText("{\"type\":\"result\",\"id\":\"" + escape(id) + "\",\"ok\":true,\"result\":{\"authenticated\":true}}");
@@ -608,11 +628,25 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private WsCallResult executeWsCall(WsSession session, String id, String op, String frameText) {
+        String contextId = session == null || session.sessionTokenId.isEmpty()
+                ? "local" : "token:" + session.sessionTokenId;
+        requestTargetContextId.set(contextId);
+        lastTargetContextId = contextId;
+        try {
+            return executeWsCallInContext(session, id, op, frameText);
+        } finally {
+            requestTargetContextId.remove();
+        }
+    }
+
+    private WsCallResult executeWsCallInContext(WsSession session, String id, String op, String frameText) {
         long started = System.currentTimeMillis();
         WsOperation.OperationSpec spec = WsOperation.specFor(op);
         if (spec == null) {
             return WsCallResult.error(id, "op_unknown", "Unknown WS operation", elapsed(started));
         }
+        String paramsJson = extractJsonMemberObject(frameText, "params");
+        Map<String, String> parsedParams = parseJsonObject(paramsJson);
         if (WsOperation.OP_TERMUX_EXEC.equals(spec.op)) {
             BearerTokenManager.Verification authorization = authorizedTermuxToken(session);
             if (!authorization.ok || !authorization.record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND)) {
@@ -621,11 +655,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
             }
         }
         if (SensitiveUiAccessPolicy.protectsOperation(spec.op)
-                && !sensitiveUiAccessAllowed(session == null ? "" : session.sessionToken)) {
+                && !sensitiveUiAccessAllowed(session == null ? "" : session.sessionToken, parsedParams)) {
             return WsCallResult.error(id, "sensitive_ui_permission_required",
                     "This paired client is not allowed to access protected Android controls", elapsed(started));
         }
-        String paramsJson = extractJsonMemberObject(frameText, "params");
         if (WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)) {
             TaskProgressParams progress;
             try {
@@ -865,10 +898,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private boolean sensitiveUiAccessAllowed(String token) {
+        return sensitiveUiAccessAllowed(token, null);
+    }
+
+    private boolean sensitiveUiAccessAllowed(String token, Map<String, String> targetParams) {
         boolean pairedClient = token != null && !token.isEmpty();
         boolean hasSensitiveScope = pairedClient
                 && tokens().hasActiveScope(token, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL);
-        return SensitiveUiAccessPolicy.allows(activeWindowContainsSensitiveUi(), pairedClient, hasSensitiveScope);
+        return SensitiveUiAccessPolicy.allows(targetWindowContainsSensitiveUi(targetParams),
+                pairedClient, hasSensitiveScope);
     }
 
     private boolean mayReceiveSensitiveUi(String token) {
@@ -1263,7 +1301,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private UiTreeSnapshot captureUiTreeSnapshot(String reason, String actionId, Map<String, String> requestedParams) {
-        boolean sensitiveUi = activeWindowContainsSensitiveUi();
+        boolean sensitiveUi = targetWindowContainsSensitiveUi(requestedParams);
         long captureBeginEventSeq;
         long captureBeginElapsedRealtimeMs = SystemClock.elapsedRealtime();
         synchronized (uiTreeStateLock) {
@@ -1274,7 +1312,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         params.put("maxNodes", "1200");
         params.put("redact", "false");
         if (requestedParams != null) {
-            for (String key : new String[]{"maxDepth", "maxNodes", "onlyTextNodes", "redact"}) {
+            for (String key : new String[]{"maxDepth", "maxNodes", "onlyTextNodes", "redact",
+                    "package", "windowId", "displayId"}) {
                 String value = requestedParams.get(key);
                 if (value != null && !value.isEmpty()) params.put(key, value);
             }
@@ -1446,13 +1485,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if ("POST".equals(method) && "/v1/auth/tokens/local".equals(path)) return localTokenCreate(body);
         if ("POST".equals(method) && "/v1/auth/tokens/import-local".equals(path)) return localTokenImport(body);
 
-        if (SensitiveUiAccessPolicy.protectsHttpPath(path)
-                && !sensitiveUiAccessAllowed(requestBearerToken.get())) {
-            return json(403, "{\"ok\":false,\"error\":\"sensitive_ui_permission_required\",\"code\":\"sensitive_ui_permission_required\"}");
-        }
-
         Map<String, String> params = parseJsonObject(body);
         params.putAll(queryParams);
+        if (SensitiveUiAccessPolicy.protectsHttpPath(path)
+                && !sensitiveUiAccessAllowed(requestBearerToken.get(), params)) {
+            return json(403, "{\"ok\":false,\"error\":\"sensitive_ui_permission_required\",\"code\":\"sensitive_ui_permission_required\"}");
+        }
         if ("GET".equals(method) && "/v1/health".equals(path)) return health();
         if ("GET".equals(method) && "/v1/debug/performance".equals(path)) {
             return json(200, "{\"ok\":true,\"performance\":" + performanceMetrics.toJson() + "}");
@@ -1561,6 +1599,18 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private static String bearerToken(String authorization) {
         BearerAuthPolicy.ParsedAuthorization parsed = BearerAuthPolicy.parse(authorization);
         return parsed.status == BearerAuthPolicy.AUTH_PRESENT ? parsed.token : "";
+    }
+
+    private String targetContextIdForToken(String token) {
+        if (token == null || token.isEmpty()) return "local";
+        BearerTokenManager.Verification verification = tokens().verify(token, "target-history");
+        return verification.ok ? "token:" + verification.record.id : "local";
+    }
+
+    private String currentTargetContextId() {
+        String contextId = requestTargetContextId.get();
+        if (contextId == null || contextId.isEmpty()) contextId = lastTargetContextId;
+        return contextId == null || contextId.isEmpty() ? "local" : contextId;
     }
 
     private Response health() {
@@ -1723,6 +1773,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (tokenId == null || tokenId.isEmpty()) return json(404, "{\"ok\":false,\"error\":\"not_found\",\"code\":\"not_found\"}");
         String decodedTokenId = decode(tokenId);
         if (!tokens().revoke(decodedTokenId)) return json(404, "{\"ok\":false,\"error\":\"not_found\",\"code\":\"not_found\"}");
+        targetHistoryStore.clear("token:" + decodedTokenId);
         return json(200, "{\"ok\":true}");
     }
 
@@ -1754,47 +1805,134 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private AccessibilityNodeInfo resolvedTargetRoot() {
-        ResolvedTarget target = resolveTarget();
+        TargetSnapshot target = resolveTarget();
         return target == null ? null : target.root;
     }
 
-    private ResolvedTarget resolveTarget() {
+    private TargetSnapshot resolveTarget() {
+        return resolveTarget(OperationTargetConstraint.none(), true);
+    }
+
+    private TargetSnapshot resolveTarget(OperationTargetConstraint constraint, boolean remember) {
         List<AccessibilityWindowInfo> windows = allWindows();
         if (windows.isEmpty()) return null;
+        List<WindowTargetResolver.Candidate> candidates = windowCandidates(windows);
+        List<Integer> ordered = WindowTargetResolver.order(candidates, ExcludedAppStore.load(this),
+                constraint, targetHistoryStore.hints(currentTargetContextId(), SystemClock.elapsedRealtime()));
+        if (ordered.isEmpty()) {
+            if (constraint == null || !constraint.specified()) clearTargetOverlay();
+            recycleWindows(windows);
+            return null;
+        }
+        int selected = ordered.get(0);
+        AccessibilityWindowInfo window = windows.get(selected);
+        AccessibilityNodeInfo root = window.getRoot();
+        if (root == null) {
+            clearTargetOverlay();
+            recycleWindows(windows);
+            return null;
+        }
+        TargetSnapshot target = targetSnapshot(windows, candidates, selected, root);
+        if (remember) acceptResolvedTarget(target);
+        recycleWindows(windows);
+        return target;
+    }
+
+    private List<WindowTargetResolver.Candidate> windowCandidates(List<AccessibilityWindowInfo> windows) {
         List<WindowTargetResolver.Candidate> candidates = new ArrayList<>();
         for (AccessibilityWindowInfo window : windows) {
             AccessibilityNodeInfo root = window == null ? null : window.getRoot();
             String packageName = root == null ? "" : str(root.getPackageName());
+            Rect bounds = new Rect();
+            if (window != null) window.getBoundsInScreen(bounds);
             candidates.add(new WindowTargetResolver.Candidate(
                     window == null ? -1 : window.getId(),
                     window == null || Build.VERSION.SDK_INT < 30
                             ? Display.DEFAULT_DISPLAY : window.getDisplayId(),
-                    window == null ? Integer.MIN_VALUE : window.getLayer(),
-                    packageName,
+                    window == null ? Integer.MIN_VALUE : window.getLayer(), packageName,
                     window != null && window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION,
-                    root != null,
-                    window != null && window.isActive(),
-                    window != null && window.isFocused()));
+                    root != null, window != null && window.isActive(),
+                    window != null && window.isFocused(), bounds.left, bounds.top,
+                    bounds.right, bounds.bottom));
             if (root != null) root.recycle();
         }
-        int selected = WindowTargetResolver.select(candidates, ExcludedAppStore.load(this),
-                preferredTargetWindowId, preferredTargetDisplayId);
-        if (selected < 0) {
-            recycleWindows(windows);
-            return null;
-        }
+        return candidates;
+    }
+
+    private TargetSnapshot targetSnapshot(List<AccessibilityWindowInfo> windows,
+                                          List<WindowTargetResolver.Candidate> candidates,
+                                          int selected, AccessibilityNodeInfo root) {
         AccessibilityWindowInfo window = windows.get(selected);
-        AccessibilityNodeInfo root = window.getRoot();
-        if (root == null) {
-            recycleWindows(windows);
-            return null;
-        }
+        WindowTargetResolver.Candidate selectedCandidate = candidates.get(selected);
         int windowId = window.getId();
         int displayId = Build.VERSION.SDK_INT >= 30 ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
-        preferredTargetWindowId = windowId;
-        preferredTargetDisplayId = displayId;
+        Rect bounds = new Rect();
+        window.getBoundsInScreen(bounds);
+        Region actionableRegion = new Region(bounds);
+        int targetLayer = window.getLayer();
+        for (int i = 0; i < windows.size(); i++) {
+            AccessibilityWindowInfo blocker = windows.get(i);
+            if (blocker == null || blocker.getId() == windowId || blocker.getLayer() <= targetLayer) continue;
+            int blockerDisplay = Build.VERSION.SDK_INT >= 30
+                    ? blocker.getDisplayId() : Display.DEFAULT_DISPLAY;
+            if (blockerDisplay != displayId) continue;
+            // Keep the target contour visually continuous across the system split divider.
+            // Gesture hit testing still treats this window as blocked in isGesturePointBlocked().
+            if (blocker.getType() == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER) continue;
+            WindowTargetResolver.Candidate blockerCandidate = candidates.get(i);
+            if (getPackageName().equals(blockerCandidate.packageName)) continue;
+            Region blockerRegion = new Region();
+            blocker.getRegionInScreen(blockerRegion);
+            actionableRegion.op(blockerRegion, Region.Op.DIFFERENCE);
+        }
+        return new TargetSnapshot(root, selectedCandidate.packageName, windowId, displayId,
+                bounds, actionableRegion);
+    }
+
+    private void acceptResolvedTarget(TargetSnapshot target) {
+        if (target == null) return;
+        preferredTargetWindowId = target.windowId;
+        preferredTargetDisplayId = target.displayId;
+        lastTargetContextId = currentTargetContextId();
+        updateTargetOverlay(target.windowId, target.displayId, target.bounds, target.actionableRegion);
+        targetHistoryStore.record(lastTargetContextId, target.toHint(), SystemClock.elapsedRealtime());
+    }
+
+    private void recordTargetHint(String contextId, String packageName, int windowId, int displayId) {
+        List<AccessibilityWindowInfo> windows = allWindows();
+        for (AccessibilityWindowInfo window : windows) {
+            if (window == null || window.getId() != windowId) continue;
+            int currentDisplay = Build.VERSION.SDK_INT >= 30
+                    ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
+            if (currentDisplay != displayId) continue;
+            Rect bounds = new Rect();
+            window.getBoundsInScreen(bounds);
+            targetHistoryStore.record(contextId,
+                    new TargetHistoryStore.WindowHint(packageName, windowId, displayId,
+                            bounds.left, bounds.top, bounds.right, bounds.bottom),
+                    SystemClock.elapsedRealtime());
+            break;
+        }
         recycleWindows(windows);
-        return new ResolvedTarget(root, windowId, displayId);
+    }
+
+    private void updateTargetOverlay(int windowId, int displayId, Rect bounds, Region actionableRegion) {
+        ConnectionStatusOverlay overlay = connectionStatusOverlay;
+        if (overlay == null) return;
+        DisplayManager manager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        Display display = manager == null ? null : manager.getDisplay(displayId);
+        DisplayMetrics metrics = new DisplayMetrics();
+        if (display != null) display.getRealMetrics(metrics);
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
+            metrics.setTo(getResources().getDisplayMetrics());
+        }
+        overlay.setTargetWindow(windowId, displayId, bounds, actionableRegion,
+                metrics.widthPixels, metrics.heightPixels, metrics.density);
+    }
+
+    private void clearTargetOverlay() {
+        ConnectionStatusOverlay overlay = connectionStatusOverlay;
+        if (overlay != null) overlay.clearTargetWindow();
     }
 
     private List<AccessibilityWindowInfo> allWindows() {
@@ -1820,21 +1958,18 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
     }
 
-    private GestureDescription.Builder gestureBuilderForTarget() {
+    private GestureDescription.Builder gestureBuilderForTarget(TargetRef target) {
         GestureDescription.Builder builder = new GestureDescription.Builder();
-        if (Build.VERSION.SDK_INT >= 30) {
-            ResolvedTarget target = resolveTarget();
-            if (target != null) {
-                builder.setDisplayId(target.displayId);
-                target.root.recycle();
-            }
-        }
+        if (Build.VERSION.SDK_INT >= 30 && target != null) builder.setDisplayId(target.displayId);
         return builder;
     }
 
     private Response uiTree(Map<String, String> params) {
-        AccessibilityNodeInfo root = resolvedTargetRoot();
-        if (root == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
+        TargetSnapshot target = resolveTarget(constraint, true);
+        if (target == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
+        AccessibilityNodeInfo root = target.root;
         try {
             boolean redact = boolParam(params, "redact", false);
             boolean onlyTextNodes = boolParam(params, "onlyTextNodes", false);
@@ -1843,11 +1978,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
             Counter counter = new Counter(maxNodes);
             StringBuilder sb = new StringBuilder();
             if (onlyTextNodes) {
-                sb.append("{\"ok\":true,\"nodes\":[");
+                sb.append("{\"ok\":true,\"target\":").append(target.ref().toJson()).append(",\"nodes\":[");
                 appendFlatNodes(sb, root, 0, 0, maxDepth, redact, counter);
                 sb.append("],\"truncated\":").append(counter.truncated).append("}");
             } else {
-                sb.append("{\"ok\":true,\"root\":");
+                sb.append("{\"ok\":true,\"target\":").append(target.ref().toJson()).append(",\"root\":");
                 appendNode(sb, root, 0, 0, maxDepth, redact, counter);
                 sb.append(",\"truncated\":").append(counter.truncated).append("}");
             }
@@ -1858,13 +1993,20 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private boolean activeWindowContainsSensitiveUi() {
+        return targetWindowContainsSensitiveUi(null);
+    }
+
+    private boolean targetWindowContainsSensitiveUi(Map<String, String> params) {
         if (Build.VERSION.SDK_INT < 34) return false;
-        AccessibilityNodeInfo root = resolvedTargetRoot();
-        if (root == null) return false;
+        OperationTargetConstraint constraint = params == null
+                ? OperationTargetConstraint.none() : OperationTargetConstraint.from(params);
+        if (!constraint.valid) return false;
+        TargetSnapshot target = resolveTarget(constraint, false);
+        if (target == null) return false;
         try {
-            return nodeTreeContainsSensitiveUi(root, 0, new int[]{2000});
+            return nodeTreeContainsSensitiveUi(target.root, 0, new int[]{2000});
         } finally {
-            root.recycle();
+            target.root.recycle();
         }
     }
 
@@ -1884,8 +2026,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Response findTextResponse(Map<String, String> params) {
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
         SearchOptions options = SearchOptions.from(params);
-        Match match = findMatch(options);
+        Match match = findMatch(options, constraint);
         if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
         String body = "{\"ok\":true,\"node\":" + match.toJson(boolParam(params, "redact", false)) + "}";
         match.recycle();
@@ -1893,8 +2037,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Response clickText(Map<String, String> params) {
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
         SearchOptions options = SearchOptions.from(params);
-        Match match = findMatch(options);
+        Match match = findMatch(options, constraint);
         if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
         ClickResult result = clickMatch(match);
         match.recycle();
@@ -1903,20 +2049,20 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private Response clickV1(Map<String, String> params) {
         Point point = pointParam(params);
-        if (point != null) {
-            return json(200, "{\"ok\":" + tap(point.x, point.y) + ",\"strategy\":\"coordinate\"}");
-        }
+        if (point != null) return tapResponse(params);
         return clickText(params);
     }
 
     private Response waitText(Map<String, String> params, boolean waitGone) {
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
         SearchOptions options = SearchOptions.from(params);
         int timeout = intParam(params, "timeout", 5000);
         int interval = Math.max(20, intParam(params, "interval", 100));
         long end = System.currentTimeMillis() + timeout;
         Match match = null;
         while (System.currentTimeMillis() < end) {
-            match = findMatch(options);
+            match = findMatch(options, constraint);
             if (waitGone) {
                 if (match == null) return json(200, "{\"ok\":true,\"gone\":true}");
                 match.recycle();
@@ -1939,8 +2085,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (options.needle.isEmpty()) {
             options = SearchOptions.from(aliasParam(params, "target", params.getOrDefault("target", "")));
         }
-        Match match = findEditableMatch(options);
-        if (match == null) match = findFocusedEditable();
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
+        Match match = findEditableMatch(options, constraint);
+        if (match == null) match = findFocusedEditable(constraint);
         if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
         showPointGesture(match.centerX(), match.centerY());
         Bundle args = new Bundle();
@@ -1950,13 +2098,19 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return json(200, "{\"ok\":" + ok + "}");
     }
 
+    private Response targetConstraintError(OperationTargetConstraint constraint) {
+        return json(400, "{\"ok\":false,\"error\":\"" + escape(constraint.error) + "\"}");
+    }
+
     private Response tapResponse(Map<String, String> params) {
         int x = intParam(params, "x", -1);
         int y = intParam(params, "y", -1);
         if (x < 0 || y < 0) return json(400, "{\"ok\":false,\"error\":\"missing_x_y\"}");
         CoordinateResolution point = resolveControlPoint(params, x, y);
         if (!point.ok) return coordinateError(point);
-        boolean ok = tap(point.x, point.y);
+        String blocked = gestureBlockReason(point.target, point.x, point.y);
+        if (!blocked.isEmpty()) return coordinateError(CoordinateResolution.error(blocked));
+        boolean ok = tap(point.target, point.x, point.y);
         return json(200, "{\"ok\":" + ok + point.resultMetadata() + "}");
     }
 
@@ -1971,46 +2125,91 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (!start.ok) return coordinateError(start);
         CoordinateResolution end = resolveControlPoint(params, x2, y2);
         if (!end.ok) return coordinateError(end);
-        boolean ok = swipe(start.x, start.y, end.x, end.y, duration);
+        if (!start.sameTarget(end)) return coordinateError(CoordinateResolution.error("stale_target"));
+        for (int step = 0; step <= 16; step++) {
+            int x = start.x + (end.x - start.x) * step / 16;
+            int y = start.y + (end.y - start.y) * step / 16;
+            String blocked = gestureBlockReason(start.target, x, y);
+            if (!blocked.isEmpty()) return coordinateError(CoordinateResolution.error(blocked));
+        }
+        boolean ok = swipe(start.target, start.x, start.y, end.x, end.y, duration);
         return json(200, "{\"ok\":" + ok +
                 (start.transformed ? ",\"coordinateSpace\":\"screenshot\",\"screenX1\":" + start.x +
                         ",\"screenY1\":" + start.y + ",\"screenX2\":" + end.x + ",\"screenY2\":" + end.y : "") + "}");
     }
 
     private Response coordinateError(CoordinateResolution resolution) {
-        int status = "capture_mapping_unavailable".equals(resolution.error) ? 409 : 400;
+        int status = "capture_mapping_unavailable".equals(resolution.error)
+                || "stale_target".equals(resolution.error)
+                || "target_occluded".equals(resolution.error) ? 409 : 400;
         return json(status, "{\"ok\":false,\"error\":\"" + escape(resolution.error) + "\"}");
     }
 
     private CoordinateResolution resolveControlPoint(Map<String, String> params, int x, int y) {
         String coordinateSpace = params.getOrDefault("coordinateSpace", "screen");
-        if ("screen".equals(coordinateSpace)) return CoordinateResolution.screen(x, y);
+        if ("screen".equals(coordinateSpace)) {
+            OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+            if (!constraint.valid) return CoordinateResolution.error(constraint.error);
+            TargetSnapshot current = resolveTarget(constraint, true);
+            if (current == null) return CoordinateResolution.error("target_not_found");
+            TargetRef target = current.ref();
+            current.root.recycle();
+            return CoordinateResolution.screen(target, x, y);
+        }
         if (!"screenshot".equals(coordinateSpace)) return CoordinateResolution.error("invalid_coordinate_space");
         String captureId = params.getOrDefault("captureId", "");
         if (captureId.isEmpty()) return CoordinateResolution.error("missing_capture_id");
         CaptureCoordinateMapping mapping = findCaptureMapping(captureId);
         if (mapping == null) return CoordinateResolution.error("capture_mapping_unavailable");
         if (!mapping.certain) return CoordinateResolution.error("capture_mapping_uncertain");
+        TargetRef target = null;
+        if (mapping.windowId >= 0) {
+            TargetSnapshot current = resolveTarget(OperationTargetConstraint.exact(
+                    mapping.packageName, mapping.windowId, mapping.displayId), false);
+            if (current == null) return CoordinateResolution.error("stale_target");
+            boolean unchanged = current.windowId == mapping.windowId
+                    && current.displayId == mapping.displayId
+                    && (mapping.packageName.isEmpty() || mapping.packageName.equals(current.packageName))
+                    && current.bounds.equals(mapping.targetBounds);
+            target = current.ref();
+            current.root.recycle();
+            if (!unchanged) return CoordinateResolution.error("stale_target");
+        } else {
+            OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+            if (!constraint.valid) return CoordinateResolution.error(constraint.error);
+            TargetSnapshot current = resolveTarget(constraint, false);
+            if (current == null) return CoordinateResolution.error("target_not_found");
+            target = current.ref();
+            current.root.recycle();
+        }
         ScreenshotCoordinateMapper.Result transformed = ScreenshotCoordinateMapper.map(
                 x, y, mapping.imageWidth, mapping.imageHeight, mapping.bounds.left, mapping.bounds.top,
                 mapping.bounds.right, mapping.bounds.bottom);
         if (!transformed.ok) return CoordinateResolution.error(transformed.error);
-        return CoordinateResolution.transformed(transformed.x, transformed.y);
+        return CoordinateResolution.transformed(target, transformed.x, transformed.y);
     }
 
     private Response scroll(Map<String, String> params) {
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
+        TargetSnapshot snapshot = resolveTarget(constraint, true);
+        if (snapshot == null) return json(404, "{\"ok\":false,\"error\":\"target_not_found\"}");
+        TargetRef target = snapshot.ref();
+        snapshot.root.recycle();
         String direction = params.getOrDefault("direction", "down");
-        Rect screen = screenBounds();
+        Rect screen = target.bounds;
         int x = screen.centerX();
         int top = Math.max(screen.top + 240, screen.height() / 4);
         int bottom = Math.max(top + 1, screen.bottom - 240);
         boolean ok = "up".equals(direction)
-                ? swipe(x, top, x, bottom, intParam(params, "duration", 350))
-                : swipe(x, bottom, x, top, intParam(params, "duration", 350));
+                ? swipe(target, x, top, x, bottom, intParam(params, "duration", 350))
+                : swipe(target, x, bottom, x, top, intParam(params, "duration", 350));
         return json(200, "{\"ok\":" + ok + "}");
     }
 
     private Response scrollUntilText(Map<String, String> params) {
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
         SearchOptions options = SearchOptions.from(params);
         int attempts = intParam(params, "attempts", 8);
         int interval = Math.max(50, intParam(params, "interval", 250));
@@ -2019,7 +2218,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Map<String, String> scrollParams = new HashMap<>(params);
         scrollParams.put("direction", direction);
         for (int i = 0; i <= attempts; i++) {
-            Match match = findMatch(options);
+            Match match = findMatch(options, constraint);
             if (match != null) {
                 String body = "{\"ok\":true,\"attempts\":" + i + ",\"node\":" + match.toJson(boolParam(params, "redact", false)) + "}";
                 match.recycle();
@@ -2241,22 +2440,36 @@ public class HenyoAccessibilityService extends AccessibilityService {
             capture.endElapsedRealtimeMs = SystemClock.elapsedRealtime();
             return capture;
         }
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) {
+            capture.error = constraint.error;
+            capture.endElapsedRealtimeMs = SystemClock.elapsedRealtime();
+            return capture;
+        }
+        TargetSnapshot requestedTarget = resolveTarget(constraint, true);
+        if (requestedTarget == null) {
+            capture.error = "target_not_found";
+            capture.endElapsedRealtimeMs = SystemClock.elapsedRealtime();
+            return capture;
+        }
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         boolean includeIndicator = boolParam(params, "includeIndicator", false);
         int screenshotWindowId = -1;
         int screenshotDisplayId = preferredTargetDisplayId;
+        String screenshotPackageName = requestedTarget.packageName;
         Rect rootBounds = new Rect();
+        requestedTarget.root.getBoundsInScreen(rootBounds);
+        capture.targetBounds = new Rect(requestedTarget.bounds);
+        capture.targetWindowId = requestedTarget.windowId;
+        screenshotDisplayId = requestedTarget.displayId;
         if (!includeIndicator && Build.VERSION.SDK_INT >= 34) {
-            ResolvedTarget target = resolveTarget();
-            if (target != null) {
-                screenshotWindowId = target.windowId;
-                screenshotDisplayId = target.displayId;
-                target.root.getBoundsInScreen(rootBounds);
-                target.root.recycle();
-            }
+            screenshotWindowId = requestedTarget.windowId;
         }
+        requestedTarget.root.recycle();
         boolean windowScopedCapture = screenshotWindowId >= 0;
+        capture.packageName = screenshotPackageName;
         prepareCaptureCoordinates(capture, windowScopedCapture, screenshotWindowId, screenshotDisplayId, rootBounds);
+        capture.windowId = capture.targetWindowId;
         boolean suppressIndicator = overlay != null && !includeIndicator && !windowScopedCapture;
         if (suppressIndicator && !overlay.beginScreenshotSuppression(500L)) {
             capture.error = "indicator_suppression_timeout";
@@ -2383,9 +2596,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
         double scaleX = valid ? ((double) bounds.width()) / capture.imageWidth : 0.0;
         double scaleY = valid ? ((double) bounds.height()) / capture.imageHeight : 0.0;
         capture.mapping = new CaptureCoordinateMapping(capture.captureId, capture.captureMode,
-                capture.displayId, capture.windowId, capture.imageWidth, capture.imageHeight,
+                capture.packageName, capture.displayId, capture.windowId, capture.imageWidth, capture.imageHeight,
                 capture.displayWidth, capture.displayHeight, bounds, scaleX, scaleY, certain,
-                capture.boundsSource, SystemClock.elapsedRealtime());
+                capture.boundsSource, capture.targetBounds, SystemClock.elapsedRealtime());
     }
 
     private void rememberCaptureMapping(CaptureCoordinateMapping mapping) {
@@ -2434,59 +2647,69 @@ public class HenyoAccessibilityService extends AccessibilityService {
             parent.recycle();
             parent = next;
         }
-        return new ClickResult(dispatchTap(match.centerX(), match.centerY()), "tap");
+        return new ClickResult(dispatchTap(match.target, match.centerX(), match.centerY()), "tap");
     }
 
-    private boolean tap(int x, int y) {
+    private boolean tap(TargetRef target, int x, int y) {
         if (Build.VERSION.SDK_INT < 24) return false;
         showPointGesture(x, y);
-        return dispatchTap(x, y);
+        return dispatchTap(target, x, y);
     }
 
-    private boolean dispatchTap(int x, int y) {
+    private boolean dispatchTap(TargetRef target, int x, int y) {
         if (Build.VERSION.SDK_INT < 24) return false;
-        if (isGesturePointBlocked(x, y)) return false;
+        if (target == null || isGesturePointBlocked(target, x, y)) return false;
         Path path = new Path();
         path.moveTo(x, y);
-        return dispatchGesture(gestureBuilderForTarget()
+        return dispatchGesture(gestureBuilderForTarget(target)
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
                 .build(), null, null);
     }
 
-    private boolean swipe(int x1, int y1, int x2, int y2, int duration) {
+    private boolean swipe(TargetRef target, int x1, int y1, int x2, int y2, int duration) {
         if (Build.VERSION.SDK_INT < 24) return false;
         for (int step = 0; step <= 16; step++) {
             int x = x1 + (x2 - x1) * step / 16;
             int y = y1 + (y2 - y1) * step / 16;
-            if (isGesturePointBlocked(x, y)) return false;
+            if (isGesturePointBlocked(target, x, y)) return false;
         }
         showSwipeGesture(x1, y1, x2, y2, duration);
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
-        return dispatchGesture(gestureBuilderForTarget()
+        return dispatchGesture(gestureBuilderForTarget(target)
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(1, duration)))
                 .build(), null, null);
     }
 
-    private boolean isGesturePointBlocked(int x, int y) {
-        ResolvedTarget target = resolveTarget();
-        if (target == null) return true;
-        target.root.recycle();
+    private boolean isGesturePointBlocked(TargetRef target, int x, int y) {
+        return !gestureBlockReason(target, x, y).isEmpty();
+    }
+
+    private String gestureBlockReason(TargetRef target, int x, int y) {
+        if (target == null) return "stale_target";
+        if (!target.bounds.contains(x, y)) return "target_outside";
+        if (!target.actionableRegion.contains(x, y)) return "target_occluded";
         List<AccessibilityWindowInfo> windows = allWindows();
         int targetLayer = Integer.MIN_VALUE;
         for (AccessibilityWindowInfo window : windows) {
             if (window != null && window.getId() == target.windowId
                     && (Build.VERSION.SDK_INT < 30 || window.getDisplayId() == target.displayId)) {
+                AccessibilityNodeInfo root = window.getRoot();
+                String packageName = root == null ? "" : str(root.getPackageName());
+                if (root != null) root.recycle();
+                if (!target.packageName.equals(packageName)) {
+                    recycleWindows(windows);
+                    return "stale_target";
+                }
                 targetLayer = window.getLayer();
                 break;
             }
         }
         if (targetLayer == Integer.MIN_VALUE) {
             recycleWindows(windows);
-            return true;
+            return "stale_target";
         }
-        boolean blocked = false;
         for (AccessibilityWindowInfo window : windows) {
             if (window == null || window.getId() == target.windowId || window.getLayer() <= targetLayer) continue;
             int displayId = Build.VERSION.SDK_INT >= 30 ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
@@ -2494,79 +2717,96 @@ public class HenyoAccessibilityService extends AccessibilityService {
             Region touchable = new Region();
             window.getRegionInScreen(touchable);
             if (touchable.contains(x, y)) {
-                blocked = true;
-                break;
+                recycleWindows(windows);
+                return "target_occluded";
             }
         }
         recycleWindows(windows);
-        return blocked;
+        return "";
     }
 
     private Match findMatch(SearchOptions options) {
+        return findMatch(options, OperationTargetConstraint.none());
+    }
+
+    private Match findMatch(SearchOptions options, OperationTargetConstraint constraint) {
         if (options.needle.isEmpty()) return null;
-        AccessibilityNodeInfo root = resolvedTargetRoot();
-        if (root == null) return null;
-        try {
-            return findMatch(root, options);
-        } finally {
-            root.recycle();
-        }
+        return findAcrossWindows(options, constraint, MATCH_ANY);
     }
 
-    private Match findEditableMatch(SearchOptions options) {
-        AccessibilityNodeInfo root = resolvedTargetRoot();
-        if (root == null) return null;
-        try {
-            return findEditableMatch(root, options);
-        } finally {
-            root.recycle();
-        }
+    private Match findEditableMatch(SearchOptions options, OperationTargetConstraint constraint) {
+        return findAcrossWindows(options, constraint, MATCH_EDITABLE);
     }
 
-    private Match findEditableMatch(AccessibilityNodeInfo node, SearchOptions options) {
-        if (node.isEditable() && nodeMatches(node, options)) return Match.from(node);
+    private Match findEditableMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target) {
+        if (node.isEditable() && nodeMatches(node, options)) return Match.from(node, target);
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
-            Match match = findEditableMatch(child, options);
+            Match match = findEditableMatch(child, options, target);
             child.recycle();
             if (match != null) return match;
         }
         return null;
     }
 
-    private Match findFocusedEditable() {
-        AccessibilityNodeInfo root = resolvedTargetRoot();
-        if (root == null) return null;
-        try {
-            return findFocusedEditable(root);
-        } finally {
+    private Match findFocusedEditable(OperationTargetConstraint constraint) {
+        return findAcrossWindows(null, constraint, MATCH_FOCUSED_EDITABLE);
+    }
+
+    private Match findFocusedEditable(AccessibilityNodeInfo node, TargetRef target) {
+        if (node.isEditable() && node.isFocused()) return Match.from(node, target);
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            Match match = findFocusedEditable(child, target);
+            child.recycle();
+            if (match != null) return match;
+        }
+        return null;
+    }
+
+    private Match findMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target) {
+        if (nodeMatches(node, options)) return Match.from(node, target);
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            Match match = findMatch(child, options, target);
+            child.recycle();
+            if (match != null) return match;
+        }
+        return null;
+    }
+
+    private static final int MATCH_ANY = 0;
+    private static final int MATCH_EDITABLE = 1;
+    private static final int MATCH_FOCUSED_EDITABLE = 2;
+
+    private Match findAcrossWindows(SearchOptions options, OperationTargetConstraint constraint, int mode) {
+        List<AccessibilityWindowInfo> windows = allWindows();
+        if (windows.isEmpty()) return null;
+        List<WindowTargetResolver.Candidate> candidates = windowCandidates(windows);
+        List<Integer> ordered = WindowTargetResolver.order(candidates, ExcludedAppStore.load(this),
+                constraint, targetHistoryStore.hints(currentTargetContextId(), SystemClock.elapsedRealtime()));
+        Match result = null;
+        for (int selected : ordered) {
+            AccessibilityWindowInfo window = windows.get(selected);
+            AccessibilityNodeInfo root = window == null ? null : window.getRoot();
+            if (root == null) continue;
+            TargetSnapshot snapshot = targetSnapshot(windows, candidates, selected, root);
+            TargetRef target = snapshot.ref();
+            if (mode == MATCH_EDITABLE) result = findEditableMatch(root, options, target);
+            else if (mode == MATCH_FOCUSED_EDITABLE) result = findFocusedEditable(root, target);
+            else result = findMatch(root, options, target);
+            if (result != null) {
+                acceptResolvedTarget(snapshot);
+                root.recycle();
+                break;
+            }
             root.recycle();
         }
-    }
-
-    private Match findFocusedEditable(AccessibilityNodeInfo node) {
-        if (node.isEditable() && node.isFocused()) return Match.from(node);
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            Match match = findFocusedEditable(child);
-            child.recycle();
-            if (match != null) return match;
-        }
-        return null;
-    }
-
-    private Match findMatch(AccessibilityNodeInfo node, SearchOptions options) {
-        if (nodeMatches(node, options)) return Match.from(node);
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            Match match = findMatch(child, options);
-            child.recycle();
-            if (match != null) return match;
-        }
-        return null;
+        recycleWindows(windows);
+        return result;
     }
 
     private boolean nodeMatches(AccessibilityNodeInfo node, SearchOptions options) {
@@ -2715,15 +2955,52 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return copy;
     }
 
-    private static final class ResolvedTarget {
+    private static final class TargetSnapshot {
         final AccessibilityNodeInfo root;
+        final String packageName;
         final int windowId;
         final int displayId;
+        final Rect bounds;
+        final Region actionableRegion;
 
-        ResolvedTarget(AccessibilityNodeInfo root, int windowId, int displayId) {
+        TargetSnapshot(AccessibilityNodeInfo root, String packageName, int windowId, int displayId,
+                       Rect bounds, Region actionableRegion) {
             this.root = root;
+            this.packageName = packageName == null ? "" : packageName;
             this.windowId = windowId;
             this.displayId = displayId;
+            this.bounds = new Rect(bounds);
+            this.actionableRegion = new Region(actionableRegion);
+        }
+
+        TargetRef ref() {
+            return new TargetRef(packageName, windowId, displayId, bounds, actionableRegion);
+        }
+
+        TargetHistoryStore.WindowHint toHint() {
+            return new TargetHistoryStore.WindowHint(packageName, windowId, displayId,
+                    bounds.left, bounds.top, bounds.right, bounds.bottom);
+        }
+    }
+
+    private static final class TargetRef {
+        final String packageName;
+        final int windowId;
+        final int displayId;
+        final Rect bounds;
+        final Region actionableRegion;
+
+        TargetRef(String packageName, int windowId, int displayId, Rect bounds, Region actionableRegion) {
+            this.packageName = packageName == null ? "" : packageName;
+            this.windowId = windowId;
+            this.displayId = displayId;
+            this.bounds = new Rect(bounds);
+            this.actionableRegion = new Region(actionableRegion);
+        }
+
+        String toJson() {
+            return "{\"package\":\"" + escape(packageName) + "\",\"windowId\":" + windowId
+                    + ",\"displayId\":" + displayId + ",\"bounds\":\"" + boundsString(bounds) + "\"}";
         }
     }
 
@@ -3389,6 +3666,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private static final class Match {
         final AccessibilityNodeInfo node;
+        final TargetRef target;
         final Rect bounds;
         final String text;
         final String desc;
@@ -3398,8 +3676,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final boolean editable;
         final boolean focused;
 
-        private Match(AccessibilityNodeInfo node, Rect bounds, String text, String desc, String viewId, String className, boolean clickable, boolean editable, boolean focused) {
+        private Match(AccessibilityNodeInfo node, TargetRef target, Rect bounds, String text, String desc, String viewId, String className, boolean clickable, boolean editable, boolean focused) {
             this.node = AccessibilityNodeInfo.obtain(node);
+            this.target = target;
             this.bounds = bounds;
             this.text = text;
             this.desc = desc;
@@ -3411,9 +3690,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
 
         static Match from(AccessibilityNodeInfo node) {
+            return from(node, null);
+        }
+
+        static Match from(AccessibilityNodeInfo node, TargetRef target) {
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
-            return new Match(node, bounds, str(node.getText()), str(node.getContentDescription()), str(node.getViewIdResourceName()), str(node.getClassName()), node.isClickable(), node.isEditable(), node.isFocused());
+            return new Match(node, target, bounds, str(node.getText()), str(node.getContentDescription()), str(node.getViewIdResourceName()), str(node.getClassName()), node.isClickable(), node.isEditable(), node.isFocused());
         }
 
         int centerX() {
@@ -3440,6 +3723,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                     "\"bounds\":\"" + boundsString(bounds) + "\"," +
                     "\"centerX\":" + centerX() + "," +
                     "\"centerY\":" + centerY() +
+                    (target == null ? "" : ",\"target\":" + target.toJson()) +
                     "}";
         }
     }
@@ -3668,6 +3952,17 @@ public class HenyoAccessibilityService extends AccessibilityService {
         refreshConnectionStatusOverlay();
     }
 
+    private void attachTargetHistory(WsSession session) {
+        if (session == null || session.sessionTokenId.isEmpty()) return;
+        String contextId = "token:" + session.sessionTokenId;
+        if (contextId.equals(session.targetHistoryContextId)) return;
+        if (!session.targetHistoryContextId.isEmpty()) {
+            targetHistoryStore.disconnect(session.targetHistoryContextId, SystemClock.elapsedRealtime());
+        }
+        session.targetHistoryContextId = contextId;
+        targetHistoryStore.connect(contextId, SystemClock.elapsedRealtime());
+    }
+
     private void unregisterWsSession(WsSession session) {
         if (session == null) {
             return;
@@ -3675,6 +3970,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         session.closeQuietly();
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay != null) overlay.releaseTaskProgress(session);
+        if (!session.targetHistoryContextId.isEmpty()) {
+            targetHistoryStore.disconnect(session.targetHistoryContextId, SystemClock.elapsedRealtime());
+            session.targetHistoryContextId = "";
+        }
         synchronized (wsSessionsLock) {
             wsSessions.remove(session);
             activeWsSessions = wsSessions.size();
@@ -3794,6 +4093,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         volatile boolean closed;
         volatile String sessionToken = "";
         volatile String sessionTokenId = "";
+        volatile String targetHistoryContextId = "";
         volatile String lastTreeDigest = "";
         volatile long latestRelevantEventSeq;
         volatile long latestRelevantEventElapsedRealtimeMs;
@@ -3899,15 +4199,18 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String error;
         String captureId = "";
         String captureMode = "unknown";
+        String packageName = "";
         String boundsSource = "unavailable";
         int displayId = Display.DEFAULT_DISPLAY;
         int windowId = -1;
+        int targetWindowId = -1;
         int imageWidth;
         int imageHeight;
         int displayWidth;
         int displayHeight;
         boolean displayMetricsCertain;
         Rect captureBounds;
+        Rect targetBounds = new Rect();
         CaptureCoordinateMapping mapping;
         long timestampElapsedRealtimeMs;
         long beginElapsedRealtimeMs;
@@ -3933,6 +4236,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
             headers.put("X-Henyo-Mapping-Certain", Boolean.toString(mapping.certain));
             if (mapping.windowId >= 0) headers.put("X-Henyo-Window-Id", Integer.toString(mapping.windowId));
             headers.put("X-Henyo-Display-Id", Integer.toString(mapping.displayId));
+            if (!mapping.packageName.isEmpty()) headers.put("X-Henyo-Target-Package", mapping.packageName);
+            headers.put("X-Henyo-Target-Bounds", mapping.targetBounds.left + "," + mapping.targetBounds.top + "," +
+                    mapping.targetBounds.right + "," + mapping.targetBounds.bottom);
             return headers;
         }
     }
@@ -3940,6 +4246,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private static final class CaptureCoordinateMapping {
         final String captureId;
         final String captureMode;
+        final String packageName;
         final int displayId;
         final int windowId;
         final int imageWidth;
@@ -3947,18 +4254,21 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final int displayWidth;
         final int displayHeight;
         final Rect bounds;
+        final Rect targetBounds;
         final double scaleX;
         final double scaleY;
         final boolean certain;
         final String boundsSource;
         final long createdElapsedRealtimeMs;
 
-        CaptureCoordinateMapping(String captureId, String captureMode, int displayId, int windowId,
+        CaptureCoordinateMapping(String captureId, String captureMode, String packageName,
+                                 int displayId, int windowId,
                                  int imageWidth, int imageHeight, int displayWidth, int displayHeight,
                                  Rect bounds, double scaleX, double scaleY, boolean certain,
-                                 String boundsSource, long createdElapsedRealtimeMs) {
+                                 String boundsSource, Rect targetBounds, long createdElapsedRealtimeMs) {
             this.captureId = captureId;
             this.captureMode = captureMode;
+            this.packageName = packageName == null ? "" : packageName;
             this.displayId = displayId;
             this.windowId = windowId;
             this.imageWidth = imageWidth;
@@ -3966,6 +4276,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             this.displayWidth = displayWidth;
             this.displayHeight = displayHeight;
             this.bounds = new Rect(bounds);
+            this.targetBounds = targetBounds == null ? new Rect() : new Rect(targetBounds);
             this.scaleX = scaleX;
             this.scaleY = scaleY;
             this.certain = certain;
@@ -3976,11 +4287,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String toJson() {
             return "{\"captureId\":\"" + escape(captureId) + "\",\"coordinateSpace\":\"screenshot\"" +
                     ",\"captureMode\":\"" + escape(captureMode) + "\",\"displayId\":" + displayId +
+                    ",\"package\":\"" + escape(packageName) + "\"" +
                     ",\"windowId\":" + (windowId >= 0 ? Integer.toString(windowId) : "null") +
                     ",\"imageWidth\":" + imageWidth + ",\"imageHeight\":" + imageHeight +
                     ",\"displayWidth\":" + displayWidth + ",\"displayHeight\":" + displayHeight +
                     ",\"captureBoundsInScreen\":{\"left\":" + bounds.left + ",\"top\":" + bounds.top +
                     ",\"right\":" + bounds.right + ",\"bottom\":" + bounds.bottom + "}" +
+                    ",\"targetBoundsInScreen\":{\"left\":" + targetBounds.left + ",\"top\":" + targetBounds.top +
+                    ",\"right\":" + targetBounds.right + ",\"bottom\":" + targetBounds.bottom + "}" +
                     ",\"scaleX\":" + scaleX + ",\"scaleY\":" + scaleY +
                     ",\"mappingCertain\":" + certain + ",\"boundsSource\":\"" + escape(boundsSource) + "\"}";
         }
@@ -3992,25 +4306,35 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final int x;
         final int y;
         final String error;
+        final TargetRef target;
 
-        private CoordinateResolution(boolean ok, boolean transformed, int x, int y, String error) {
+        private CoordinateResolution(boolean ok, boolean transformed, TargetRef target,
+                                     int x, int y, String error) {
             this.ok = ok;
             this.transformed = transformed;
             this.x = x;
             this.y = y;
             this.error = error;
+            this.target = target;
         }
 
-        static CoordinateResolution screen(int x, int y) {
-            return new CoordinateResolution(true, false, x, y, "");
+        static CoordinateResolution screen(TargetRef target, int x, int y) {
+            return new CoordinateResolution(true, false, target, x, y, "");
         }
 
-        static CoordinateResolution transformed(int x, int y) {
-            return new CoordinateResolution(true, true, x, y, "");
+        static CoordinateResolution transformed(TargetRef target, int x, int y) {
+            return new CoordinateResolution(true, true, target, x, y, "");
         }
 
         static CoordinateResolution error(String error) {
-            return new CoordinateResolution(false, false, 0, 0, error);
+            return new CoordinateResolution(false, false, null, 0, 0, error);
+        }
+
+        boolean sameTarget(CoordinateResolution other) {
+            return other != null && target != null && other.target != null
+                    && target.windowId == other.target.windowId
+                    && target.displayId == other.target.displayId
+                    && target.packageName.equals(other.target.packageName);
         }
 
         String resultMetadata() {

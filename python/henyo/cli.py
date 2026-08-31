@@ -84,6 +84,14 @@ def selector(text: str, args: List[str]) -> Dict[str, Any]:
             out["field"] = args[i]
         elif args[i] == "--clickable-only":
             out["clickableOnly"] = True
+        elif args[i] in ("--package", "--window-id", "--display-id"):
+            option = args[i]
+            i += 1
+            if i >= len(args):
+                raise SystemExit(f"{option} requires a value")
+            key = {"--package": "package", "--window-id": "windowId",
+                   "--display-id": "displayId"}[option]
+            out[key] = args[i] if option == "--package" else int(args[i])
         elif args[i] == "--redact":
             pass
         i += 1
@@ -169,6 +177,13 @@ def coordinate_gesture_params(kind: str, argv: List[str]) -> Dict[str, Any]:
             if i >= len(argv):
                 raise SystemExit("--capture-id requires an id")
             capture_id = argv[i]
+        elif option in ("--package", "--window-id", "--display-id"):
+            i += 1
+            if i >= len(argv):
+                raise SystemExit(f"{option} requires a value")
+            key = {"--package": "package", "--window-id": "windowId",
+                   "--display-id": "displayId"}[option]
+            params[key] = argv[i] if option == "--package" else int(argv[i])
         else:
             raise SystemExit(f"unknown {kind} option: {option}")
         i += 1
@@ -462,6 +477,13 @@ def observe(argv: List[str], display: Dict[str, str] | None = None) -> int:
                 "--timeout": "timeout",
             }[option]
             params[key] = int(argv[i])
+        elif option in ("--package", "--window-id", "--display-id"):
+            i += 1
+            if i >= len(argv):
+                raise SystemExit(f"{option} requires a value")
+            key = {"--package": "package", "--window-id": "windowId",
+                   "--display-id": "displayId"}[option]
+            params[key] = argv[i] if option == "--package" else int(argv[i])
         else:
             raise SystemExit(f"unknown observe option: {option}")
         i += 1
@@ -692,11 +714,15 @@ def cleanup_screenshots(directory: Path, prefix: str) -> None:
 def screenshot_payload_via_helper(
     timeout: str,
     display: Dict[str, str] | None = None,
+    target: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if os.environ.get("HENYO_NO_HELPER"):
         raise RuntimeError("helper_disabled")
+    params: Dict[str, Any] = {"timeout": int(timeout)}
+    if target:
+        params.update(target)
     response = helper_request(add_display(
-        {"cmd": "call", "op": "screen.screenshot", "params": {"timeout": int(timeout)}},
+        {"cmd": "call", "op": "screen.screenshot", "params": params},
         display,
     ))
     if response.get("error") == "helper_target_mismatch":
@@ -723,6 +749,7 @@ def screenshot(
     prefix = os.environ.get("HENYO_SCREENSHOT_PREFIX", "henyo-screenshot")
     timeout = os.environ.get("HENYO_SCREENSHOT_TIMEOUT_MS", "5000")
     json_output = False
+    target: Dict[str, Any] = {}
     i = 0
     while i < len(argv):
         if argv[i] == "--ttl":
@@ -733,6 +760,14 @@ def screenshot(
             i += 1; timeout = argv[i]
         elif argv[i] == "--json":
             json_output = True
+        elif argv[i] in ("--package", "--window-id", "--display-id"):
+            option = argv[i]
+            i += 1
+            if i >= len(argv):
+                raise SystemExit(f"{option} requires a value")
+            key = {"--package": "package", "--window-id": "windowId",
+                   "--display-id": "displayId"}[option]
+            target[key] = argv[i] if option == "--package" else int(argv[i])
         else:
             usage(); return 2
         i += 1
@@ -745,7 +780,7 @@ def screenshot(
     tmp = path.with_suffix(path.suffix + f".part.{os.getpid()}")
     coordinates: Dict[str, Any] | None = None
     try:
-        result = screenshot_payload_via_helper(timeout, display)
+        result = screenshot_payload_via_helper(timeout, display, target)
         tmp.write_bytes(base64.b64decode(result.get("data", ""), validate=True))
         if isinstance(result.get("coordinates"), dict):
             coordinates = result["coordinates"]
@@ -756,6 +791,12 @@ def screenshot(
             pass
         return print_json(exc.response)
     except Exception:
+        if target:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            return print_json({"ok": False, "error": "target_capture_failed"})
         try:
             tmp.write_bytes(http_request("GET", f"/v1/screen/screenshot?timeout={quote(str(timeout))}", raw=True))
         except Exception:

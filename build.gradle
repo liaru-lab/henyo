@@ -133,7 +133,12 @@ tasks.register("verifyScreenshotCoordinateMapper", Exec) {
 tasks.register("verifyWindowTargetResolver", Exec) {
     inputs.file("scripts/verify-window-target-resolver.sh")
     inputs.file("src/main/java/link/liaru/henyo/WindowTargetResolver.java")
+    inputs.file("src/main/java/link/liaru/henyo/OperationTargetConstraint.java")
+    inputs.file("src/main/java/link/liaru/henyo/TargetHistoryStore.java")
     inputs.file("src/test/java/link/liaru/henyo/WindowTargetResolverTest.java")
+    inputs.file("src/test/java/link/liaru/henyo/TargetHistoryStoreTest.java")
+    inputs.file("src/main/java/link/liaru/henyo/TargetGlowModel.java")
+    inputs.file("src/test/java/link/liaru/henyo/TargetGlowModelTest.java")
     commandLine "bash", "scripts/verify-window-target-resolver.sh"
 }
 

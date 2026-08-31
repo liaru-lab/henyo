@@ -483,11 +483,11 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 
 | WS op | HTTP v1 equivalent | Params | Result |
 | --- | --- | --- | --- |
-| `ui.tree` | `GET /v1/ui/tree` | `maxDepth`, `onlyTextNodes`, `redact`, `maxNodes` | Direct tree payload with service epoch and capture sequence/time range |
-| `ui.observe` | WS only | `maxDepth`, `onlyTextNodes`, `redact`, `maxNodes`, `timeout`, `maxAttempts`, `includeIndicator` | Tree and screenshot with shared observation stability metadata; indicator excluded by default |
-| `ui.find` | `POST /v1/ui/find` | `selector`, `redact` | Existing find payload |
-| `ui.click` | `POST /v1/ui/click` | `selector` or `x/y` or `bounds` | Existing click payload |
-| `ui.setText` | `POST /v1/ui/set-text` | `selector`, `value` | Existing set-text payload |
+| `ui.tree` | `GET /v1/ui/tree` | `maxDepth`, `onlyTextNodes`, `redact`, `maxNodes`; optional target fields | Direct tree payload with the resolved target, service epoch, and capture sequence/time range |
+| `ui.observe` | WS only | `maxDepth`, `onlyTextNodes`, `redact`, `maxNodes`, `timeout`, `maxAttempts`, `includeIndicator`; optional target fields | Targeted tree and screenshot with shared observation stability metadata; indicator excluded by default |
+| `ui.find` | `POST /v1/ui/find` | `selector`, `redact`; optional target fields | Find payload including the matched node's owning window |
+| `ui.click` | `POST /v1/ui/click` | `selector` or `x/y` or `bounds`; optional target fields | Node action in the resolved owning window, with guarded coordinate fallback |
+| `ui.setText` | `POST /v1/ui/set-text` | `selector`, `value`; optional target fields | Set text in the resolved owning window |
 | `ui.tap` | `POST /v1/ui/tap` | `x`, `y`; optional `coordinateSpace`, `captureId` | Screen-coordinate tap by default; safely mapped screenshot-coordinate tap when requested |
 | `ui.swipe` | `POST /v1/ui/swipe` | `x1`, `y1`, `x2`, `y2`, `duration`; optional `coordinateSpace`, `captureId` | Screen-coordinate swipe by default; safely mapped screenshot-coordinate swipe when requested |
 | `ui.scroll` | `POST /v1/ui/scroll` | `direction` | Existing scroll payload |
@@ -500,7 +500,7 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 | `app.start` | `POST /v1/app/start` | `component` | Existing start payload |
 | `global.back` | `POST /v1/global/back` | none | Existing global-action payload |
 | `global.home` | `POST /v1/global/home` | none | Existing global-action payload |
-| `screen.screenshot` | `GET /v1/screen/screenshot` | `timeout`, `includeIndicator` | Indicator-free PNG metadata/data by default, capture timing, and a screenshot-to-screen coordinate mapping |
+| `screen.screenshot` | `GET /v1/screen/screenshot` | `timeout`, `includeIndicator`; optional target fields | Indicator-free targeted PNG metadata/data by default, capture timing, and a screenshot-to-screen coordinate mapping |
 | `termux.exec` | WS only | `commandPath`, `arguments`, `workdir`, `stdin`, `timeout` | Structured bounded stdout/stderr, exit code, Termux internal error, original lengths, and duration |
 | `task.progress.set` | WS only | structured full snapshot: `goal`, ordered `steps[{text,status}]`, optional `replan`; or legacy `goal`, `completed`, `current` | Presentation application acknowledgement; never echoes text |
 | `task.progress.finish` | WS only | none | Idempotent presentation clear acknowledgement |
@@ -588,6 +588,28 @@ Selector shape:
 
 `field` is one of `text`, `desc`, `viewId`, or `any`.
 
+### Operation-scoped window targeting
+
+UI, observation, screenshot, and coordinate operations accept optional
+`package`, `windowId`, and `displayId` target fields. `package` restricts
+resolution to that application. `windowId` pins an existing window, while the
+package permits safe re-resolution inside the same application if Android has
+recreated that id. A stale `windowId` without a package is never rebound to an
+unrelated window.
+
+Henyo searches the most recently successful window first, then the remaining
+windows of recently used packages, then other eligible application windows.
+Excluded applications never enter this candidate list. A matched
+`AccessibilityNodeInfo` supplies its owning window, so supported node actions
+can run without first making that window active. Coordinate gestures remain
+physical display gestures and are rejected if another window covers the point.
+
+Target history contains only package/window/display identifiers and geometry,
+is memory-only, and is bounded. It survives a control-client disconnect for
+ten minutes to accommodate reconnects, then expires if the client does not
+return. Every use is checked against the current accessibility-window list;
+Android node and window objects are never retained in the history.
+
 ### Screenshot coordinates
 
 `screen.screenshot` and the nested screenshot in `ui.observe` include a
@@ -598,6 +620,7 @@ Selector shape:
   "captureId": "c42c...",
   "coordinateSpace": "screenshot",
   "captureMode": "window",
+  "package": "com.example.app",
   "displayId": 0,
   "windowId": 17,
   "imageWidth": 1080,
@@ -605,6 +628,7 @@ Selector shape:
   "displayWidth": 1080,
   "displayHeight": 2412,
   "captureBoundsInScreen": {"left": 0, "top": 113, "right": 1080, "bottom": 2412},
+  "targetBoundsInScreen": {"left": 0, "top": 113, "right": 1080, "bottom": 2412},
   "scaleX": 1.0,
   "scaleY": 1.0,
   "mappingCertain": true,
@@ -628,7 +652,8 @@ screen-coordinate behavior.
 
 The raw HTTP PNG endpoint carries the same fields in `X-Henyo-*` response
 headers (`Capture-Id`, `Image-Size`, `Display-Size`, `Capture-Bounds`,
-`Capture-Scale`, `Mapping-Certain`, `Window-Id`, and `Display-Id`).
+`Capture-Scale`, `Mapping-Certain`, `Window-Id`, `Display-Id`,
+`Target-Package`, and `Target-Bounds`).
 
 ## HTTP During WS Migration
 

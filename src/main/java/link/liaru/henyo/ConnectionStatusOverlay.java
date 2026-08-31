@@ -13,6 +13,8 @@ import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
 import android.graphics.RadialGradient;
 import android.graphics.RectF;
+import android.graphics.Rect;
+import android.graphics.Region;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Build;
@@ -29,6 +31,9 @@ import android.text.style.ReplacementSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.Display;
+import android.content.Context;
+import android.hardware.display.DisplayManager;
 
 import java.util.List;
 import java.util.IdentityHashMap;
@@ -52,7 +57,6 @@ final class ConnectionStatusOverlay {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final WindowManager windowManager;
     private final int edgeDepthPx;
-    private final int activityHeightPx;
     private final AgentActivityModel activityModel = new AgentActivityModel();
     private final TaskProgressModel progressModel = new TaskProgressModel();
     private final CompletionMessageModel completionModel = new CompletionMessageModel();
@@ -65,10 +69,9 @@ final class ConnectionStatusOverlay {
 
     private IndicatorView view;
     private WindowManager.LayoutParams params;
-    private IndicatorView bottomView;
-    private IndicatorView leftView;
-    private IndicatorView rightView;
     private ActivityView activityView;
+    private WindowManager activityWindowManager;
+    private final TargetVisualState targetVisualState = new TargetVisualState();
     private boolean connected;
     private boolean active;
     private boolean fadingOut;
@@ -84,7 +87,6 @@ final class ConnectionStatusOverlay {
         this.windowManager = (WindowManager) service.getSystemService(AccessibilityService.WINDOW_SERVICE);
         float density = service.getResources().getDisplayMetrics().density;
         this.edgeDepthPx = Math.max(3, Math.round(48f * density));
-        this.activityHeightPx = Math.max(edgeDepthPx, Math.round(400f * density));
         nextMainHeartbeatAtMs = SystemClock.uptimeMillis() + MAIN_HEARTBEAT_MS;
         mainHandler.postDelayed(mainHeartbeat, MAIN_HEARTBEAT_MS);
     }
@@ -241,6 +243,31 @@ final class ConnectionStatusOverlay {
         postVisual(() -> visualModel.beginScan(logicalId, SystemClock.uptimeMillis()));
     }
 
+    void setTargetWindow(int windowId, int displayId, Rect bounds, Region actionableRegion,
+                         int displayWidth, int displayHeight, float density) {
+        Rect boundsCopy = bounds == null ? new Rect() : new Rect(bounds);
+        Region regionCopy = actionableRegion == null ? new Region() : new Region(actionableRegion);
+        mainHandler.post(() -> {
+            if (destroyed) return;
+            boolean displayChanged = targetVisualState.displayId != displayId;
+            targetVisualState.set(windowId, displayId, boundsCopy, regionCopy,
+                    displayWidth, displayHeight, density);
+            if (displayChanged) {
+                visualCoordinates.clear();
+                if (activityView != null) removeActivityView();
+            }
+            ensureActivityView();
+            if (activityView != null) activityView.invalidate();
+        });
+    }
+
+    void clearTargetWindow() {
+        mainHandler.post(() -> {
+            targetVisualState.clear();
+            if (activityView != null) activityView.invalidate();
+        });
+    }
+
     long showPoint(int x, int y) {
         return prepareVisual(now -> visualCoordinates.prepareAction(
                 visualModel, AgentVisualModel.GLOVE_POSE_POINT,
@@ -346,15 +373,18 @@ final class ConnectionStatusOverlay {
     }
 
     private int displayWidth() {
-        return service.getResources().getDisplayMetrics().widthPixels;
+        return targetVisualState.valid ? targetVisualState.displayWidth
+                : service.getResources().getDisplayMetrics().widthPixels;
     }
 
     private int displayHeight() {
-        return service.getResources().getDisplayMetrics().heightPixels;
+        return targetVisualState.valid ? targetVisualState.displayHeight
+                : service.getResources().getDisplayMetrics().heightPixels;
     }
 
     private float displayDensity() {
-        return service.getResources().getDisplayMetrics().density;
+        return targetVisualState.valid ? targetVisualState.density
+                : service.getResources().getDisplayMetrics().density;
     }
 
     boolean beginScreenshotSuppression(long timeoutMs) {
@@ -583,67 +613,21 @@ final class ConnectionStatusOverlay {
         IndicatorView attached = view;
         view = null;
         params = null;
-        ActivityView attachedActivity = activityView;
-        activityView = null;
         removeActiveEdgeViews();
         removeAttachedView(attached);
-        removeAttachedView(attachedActivity);
+        removeActivityView();
     }
 
     private void ensureActiveEdgeViews() {
-        if ((!active && !fadingOut && !visualModel.isActivityVisible(SystemClock.uptimeMillis()))
-                || windowManager == null || captureSuppressionDepth > 0) return;
-        if (bottomView == null) bottomView = addEdgeView(EDGE_BOTTOM);
-        if (leftView == null) leftView = addEdgeView(EDGE_LEFT);
-        if (rightView == null) rightView = addEdgeView(EDGE_RIGHT);
+        // Active targeting is rendered as one target-window contour in ActivityView.
     }
 
     private void invalidateActiveEdgeViews() {
-        if (bottomView != null) bottomView.invalidate();
-        if (leftView != null) leftView.invalidate();
-        if (rightView != null) rightView.invalidate();
-    }
-
-    private IndicatorView addEdgeView(int edge) {
-        IndicatorView edgeView = new IndicatorView(service, visualModel);
-        edgeView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
-        edgeView.setContentDescription(null);
-        boolean vertical = edge == EDGE_LEFT || edge == EDGE_RIGHT;
-        WindowManager.LayoutParams edgeParams = new WindowManager.LayoutParams(
-                vertical ? edgeDepthPx : WindowManager.LayoutParams.MATCH_PARENT,
-                vertical ? WindowManager.LayoutParams.MATCH_PARENT : edgeDepthPx,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT);
-        edgeParams.gravity = edge == EDGE_BOTTOM ? Gravity.BOTTOM | Gravity.START
-                : edge == EDGE_LEFT ? Gravity.TOP | Gravity.START
-                : Gravity.TOP | Gravity.END;
-        edgeParams.setTitle("Henyo activity edge " + edge);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            edgeParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        }
-        try {
-            windowManager.addView(edgeView, edgeParams);
-            edgeView.setEdge(edge);
-            return edgeView;
-        } catch (RuntimeException ignored) {
-            return null;
-        }
+        // The target contour owns active animation invalidation.
     }
 
     private void removeActiveEdgeViews() {
-        IndicatorView bottom = bottomView;
-        IndicatorView left = leftView;
-        IndicatorView right = rightView;
-        bottomView = null;
-        leftView = null;
-        rightView = null;
-        removeAttachedView(bottom);
-        removeAttachedView(left);
-        removeAttachedView(right);
+        // Kept as a lifecycle hook; active edge windows no longer exist.
     }
 
     private void ensureActivityView() {
@@ -653,9 +637,15 @@ final class ConnectionStatusOverlay {
                 && activityModel.isEmpty(SystemClock.uptimeMillis())
                 && progressModel.isEmpty()
                 && completionModel.isEmpty(SystemClock.uptimeMillis()))) return;
-        ActivityView candidate = new ActivityView(service, activityModel, progressModel,
+        int requestedDisplayId = targetVisualState.valid
+                ? targetVisualState.displayId : Display.DEFAULT_DISPLAY;
+        Context overlayContext = displayContext(requestedDisplayId);
+        WindowManager targetManager = overlayContext == null ? null
+                : (WindowManager) overlayContext.getSystemService(Context.WINDOW_SERVICE);
+        if (targetManager == null) return;
+        ActivityView candidate = new ActivityView(overlayContext, activityModel, progressModel,
                 completionModel, visualModel,
-                visualCoordinates, activityHeightPx,
+                visualCoordinates, targetVisualState,
                 () -> mainHandler.post(this::removeActivityViewIfEmpty), performanceMetrics);
         candidate.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         candidate.setContentDescription(null);
@@ -676,8 +666,9 @@ final class ConnectionStatusOverlay {
             activityParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
         try {
-            windowManager.addView(candidate, activityParams);
+            targetManager.addView(candidate, activityParams);
             activityView = candidate;
+            activityWindowManager = targetManager;
         } catch (RuntimeException ignored) {
             candidate.stopAnimation();
         }
@@ -689,9 +680,34 @@ final class ConnectionStatusOverlay {
                 || !activityModel.isEmpty(SystemClock.uptimeMillis())
                 || !progressModel.isEmpty()
                 || !completionModel.isEmpty(SystemClock.uptimeMillis())) return;
+        removeActivityView();
+    }
+
+    private void removeActivityView() {
         ActivityView attached = activityView;
+        WindowManager manager = activityWindowManager;
         activityView = null;
-        removeAttachedView(attached);
+        activityWindowManager = null;
+        if (attached == null || manager == null) return;
+        attached.stopAnimation();
+        try {
+            manager.removeViewImmediate(attached);
+        } catch (RuntimeException ignored) {
+            // The display or accessibility connection may already be gone.
+        }
+    }
+
+    private Context displayContext(int displayId) {
+        if (displayId == Display.DEFAULT_DISPLAY) return service;
+        DisplayManager manager = (DisplayManager) service.getSystemService(Context.DISPLAY_SERVICE);
+        Display display = manager == null ? null : manager.getDisplay(displayId);
+        if (display == null) return service;
+        Context context = service.createDisplayContext(display);
+        if (Build.VERSION.SDK_INT >= 30) {
+            context = context.createWindowContext(
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null);
+        }
+        return context;
     }
 
     private void removeAttachedView(IndicatorView attached) {
@@ -704,13 +720,53 @@ final class ConnectionStatusOverlay {
         }
     }
 
-    private void removeAttachedView(ActivityView attached) {
-        if (attached == null || windowManager == null) return;
-        attached.stopAnimation();
-        try {
-            windowManager.removeViewImmediate(attached);
-        } catch (RuntimeException ignored) {
-            // The accessibility connection may already have removed its windows.
+    /** Geometry is controller-owned so screenshot detach/restore preserves motion. */
+    private static final class TargetVisualState {
+        final Rect bounds = new Rect();
+        final Region actionableRegion = new Region();
+        final Path outline = new Path();
+        final Path actionableClip = new Path();
+        int windowId = -1;
+        int displayId = Display.DEFAULT_DISPLAY;
+        int displayWidth;
+        int displayHeight;
+        float density = 1f;
+        long generation;
+        boolean valid;
+
+        void set(int newWindowId, int newDisplayId, Rect newBounds, Region newRegion,
+                 int newDisplayWidth, int newDisplayHeight, float newDensity) {
+            if (valid && windowId == newWindowId && displayId == newDisplayId
+                    && bounds.equals(newBounds) && actionableRegion.equals(newRegion)
+                    && displayWidth == newDisplayWidth && displayHeight == newDisplayHeight
+                    && Float.compare(density, Math.max(0.5f, newDensity)) == 0) return;
+            windowId = newWindowId;
+            displayId = newDisplayId;
+            bounds.set(newBounds);
+            actionableRegion.set(newRegion);
+            displayWidth = newDisplayWidth;
+            displayHeight = newDisplayHeight;
+            density = Math.max(0.5f, newDensity);
+            valid = windowId >= 0 && !bounds.isEmpty() && !actionableRegion.isEmpty();
+            outline.reset();
+            actionableClip.reset();
+            if (valid) {
+                float radius = Math.min(14f * density,
+                        Math.min(bounds.width(), bounds.height()) * 0.08f);
+                outline.addRoundRect(new RectF(bounds), radius, radius, Path.Direction.CW);
+                actionableRegion.getBoundaryPath(actionableClip);
+            }
+            generation++;
+        }
+
+        void clear() {
+            valid = false;
+            windowId = -1;
+            bounds.setEmpty();
+            actionableRegion.setEmpty();
+            outline.reset();
+            actionableClip.reset();
+            generation++;
         }
     }
 
@@ -928,10 +984,8 @@ final class ConnectionStatusOverlay {
             long now = SystemClock.uptimeMillis();
             float phase = (now % 8_000L) / 8_000f * (float) (Math.PI * 2.0);
             float idlePulse = 0.78f + 0.22f * (float) Math.sin(phase);
-            float activePulse = AgentVisualModel.pulse(now);
-            float activeAmount = visualModel.activityEnvelope(now);
             float idleAmount = edge == EDGE_TOP ? 0.18f * idlePulse : 0f;
-            float amount = idleAmount + Math.max(0f, activeAmount) * (activePulse - idleAmount);
+            float amount = idleAmount;
             if (edgeGradient == null) rebuildShaders(width, height);
             gradientPaint.setShader(edgeGradient);
             gradientPaint.setAlpha(Math.round(255f * amount));
@@ -939,13 +993,8 @@ final class ConnectionStatusOverlay {
 
             float cornerPulseA = 0.58f + 0.42f * (float) Math.sin(phase * 1.15f + 1.3f);
             float cornerPulseB = 0.60f + 0.40f * (float) Math.sin(phase * 0.94f + 3.7f);
-            if (edge == EDGE_TOP || edge == EDGE_BOTTOM) {
-                drawCornerGlow(canvas, cornerGradientA, cornerAX, cornerAY, cornerPulseA * activeAmount);
-                drawCornerGlow(canvas, cornerGradientB, cornerBX, cornerBY, cornerPulseB * activeAmount);
-            } else {
-                drawCornerGlow(canvas, cornerGradientA, cornerAX, cornerAY, cornerPulseA * activeAmount * 0.62f);
-                drawCornerGlow(canvas, cornerGradientB, cornerBX, cornerBY, cornerPulseB * activeAmount * 0.62f);
-            }
+            // Target activity uses the window contour in ActivityView; the top strip
+            // remains a quiet connection indicator without additive corner hotspots.
             if (edge == EDGE_TOP || visualModel.isActivityVisible(now)) postInvalidateOnAnimation();
         }
 
@@ -984,6 +1033,8 @@ final class ConnectionStatusOverlay {
         private final Paint gloveBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint gloveGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint targetOutlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint targetGlowBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final TextPaint progressPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint progressIconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path activityGridPath = new Path();
@@ -993,6 +1044,7 @@ final class ConnectionStatusOverlay {
         private final RectF gloveRect = new RectF();
         private final RectF gloveGlowRect = new RectF();
         private final float[] gloveWrist = new float[2];
+        private final TargetVisualState targetVisualState;
         private final Bitmap pointGloveBitmap;
         private final Bitmap swipeGloveBitmap;
         private final Bitmap backGloveBitmap;
@@ -1019,26 +1071,30 @@ final class ConnectionStatusOverlay {
         private int completionLayoutWidth = -1;
         private StaticLayout completionLayout;
         private long stackTransitionStartedAtMs;
+        private long targetShaderGeneration = -1L;
+        private long targetGlowBitmapGeneration = -1L;
+        private Bitmap targetGlowBitmap;
         private boolean running = true;
         private boolean emptyCallbackPosted;
 
-        ActivityView(AccessibilityService service, AgentActivityModel model,
+        ActivityView(Context context, AgentActivityModel model,
                 TaskProgressModel progressModel,
                 CompletionMessageModel completionModel,
                 AgentVisualModel visualModel, VisualCoordinates visualCoordinates,
-                int backdropHeightPx, Runnable emptyCallback,
+                TargetVisualState targetVisualState, Runnable emptyCallback,
                 PerformanceMetrics performanceMetrics) {
-            super(service);
+            super(context);
             this.model = model;
             this.progressModel = progressModel;
             this.completionModel = completionModel;
             this.visualModel = visualModel;
             this.visualCoordinates = visualCoordinates;
-            this.backdropHeightPx = backdropHeightPx;
+            this.targetVisualState = targetVisualState;
+            this.density = context.getResources().getDisplayMetrics().density;
+            this.backdropHeightPx = Math.max(1, Math.round(400f * this.density));
             this.emptyCallback = emptyCallback;
             this.performanceMetrics = performanceMetrics;
-            this.density = service.getResources().getDisplayMetrics().density;
-            float scaledDensity = service.getResources().getDisplayMetrics().scaledDensity;
+            float scaledDensity = context.getResources().getDisplayMetrics().scaledDensity;
             float textSize = 20f * scaledDensity;
             renderPaint.setTextSize(textSize);
             renderPaint.setStrokeJoin(Paint.Join.ROUND);
@@ -1074,6 +1130,9 @@ final class ConnectionStatusOverlay {
             targetPaint.setColor(TEXT_GLOW);
             targetPaint.setStyle(Paint.Style.STROKE);
             targetPaint.setStrokeWidth(1.25f * density);
+            targetOutlinePaint.setStyle(Paint.Style.STROKE);
+            targetOutlinePaint.setStrokeCap(Paint.Cap.ROUND);
+            targetOutlinePaint.setStrokeJoin(Paint.Join.ROUND);
             setWillNotDraw(false);
         }
 
@@ -1103,6 +1162,12 @@ final class ConnectionStatusOverlay {
         }
 
         @Override
+        protected void onDetachedFromWindow() {
+            recycleTargetGlowBitmap();
+            super.onDetachedFromWindow();
+        }
+
+        @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             long drawStartedNanos = System.nanoTime();
@@ -1112,6 +1177,7 @@ final class ConnectionStatusOverlay {
             CompletionMessageModel.Message completion = completionModel.current(now);
             int width = getWidth();
             int height = getHeight();
+            drawTargetWindowGlow(canvas, now);
             int left = Math.round(24f * density);
             int textWidth = Math.max(1, Math.min(width - left * 2, Math.round(width * 0.88f)));
             StaticLayout fullCompletionLayout = completion == null ? null
@@ -1214,6 +1280,101 @@ final class ConnectionStatusOverlay {
                     ? height - backdropHeightPx : Math.round(dynamicShadeTop);
             scheduleNextFrame(now, width, height, cursorFrame, hasPresentation, presentationTop);
             performanceMetrics.recordActivityDraw(now, System.nanoTime() - drawStartedNanos);
+        }
+
+        private void drawTargetWindowGlow(Canvas canvas, long now) {
+            if (!targetVisualState.valid || !visualModel.isActivityVisible(now)) return;
+            Rect bounds = targetVisualState.bounds;
+            if (bounds.isEmpty()) return;
+            float depth = TargetGlowModel.depthPx(bounds.width(), bounds.height(),
+                    targetVisualState.density);
+            float breath = TargetGlowModel.breath(now);
+            depth *= 0.96f + 0.08f * breath;
+            float intensity = TargetGlowModel.intensity(
+                    visualModel.activityEnvelope(now), breath);
+
+            if (targetShaderGeneration != targetVisualState.generation) {
+                targetShaderGeneration = targetVisualState.generation;
+                Shader targetShader = new LinearGradient(
+                        bounds.left, bounds.top, bounds.right, bounds.bottom,
+                        new int[]{
+                                Color.rgb(67, 210, 196),
+                                Color.rgb(92, 154, 222),
+                                Color.rgb(157, 126, 204),
+                                Color.rgb(67, 210, 196)
+                        },
+                        new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP);
+                targetOutlinePaint.setShader(targetShader);
+            }
+
+            ensureTargetGlowBitmap(depth);
+            int saved = canvas.save();
+            canvas.clipPath(targetVisualState.actionableClip);
+            if (targetGlowBitmap != null) {
+                targetGlowBitmapPaint.setAlpha(Math.round(245f * intensity));
+                canvas.drawBitmap(targetGlowBitmap, bounds.left, bounds.top, targetGlowBitmapPaint);
+            }
+            targetOutlinePaint.setStrokeWidth(8f * targetVisualState.density);
+            targetOutlinePaint.setAlpha(245);
+            canvas.drawPath(targetVisualState.outline, targetOutlinePaint);
+            canvas.restoreToCount(saved);
+        }
+
+        private void ensureTargetGlowBitmap(float depth) {
+            Rect bounds = targetVisualState.bounds;
+            if (targetGlowBitmapGeneration == targetVisualState.generation
+                    && targetGlowBitmap != null
+                    && targetGlowBitmap.getWidth() == bounds.width()
+                    && targetGlowBitmap.getHeight() == bounds.height()) return;
+            recycleTargetGlowBitmap();
+            if (bounds.isEmpty()) return;
+            int width = bounds.width();
+            int height = bounds.height();
+            int[] pixels;
+            try {
+                targetGlowBitmap = Bitmap.createBitmap(
+                        width, height, Bitmap.Config.ARGB_8888);
+                pixels = new int[Math.multiplyExact(width, height)];
+            } catch (RuntimeException | OutOfMemoryError ignored) {
+                recycleTargetGlowBitmap();
+                targetGlowBitmap = null;
+                return;
+            }
+            float halfWidth = width * 0.5f;
+            float halfHeight = height * 0.5f;
+            float radius = Math.min(14f * targetVisualState.density,
+                    Math.min(width, height) * 0.08f);
+            float flatHalfWidth = Math.max(0f, halfWidth - radius);
+            float flatHalfHeight = Math.max(0f, halfHeight - radius);
+            float glowDepth = Math.max(12f * targetVisualState.density, depth * 3.2f);
+            float projectionDenominator = Math.max(1f, width * (float) width + height * (float) height);
+            for (int y = 0; y < height; y++) {
+                float localY = y + 0.5f;
+                float qy = Math.abs(localY - halfHeight) - flatHalfHeight;
+                for (int x = 0; x < width; x++) {
+                    float localX = x + 0.5f;
+                    float qx = Math.abs(localX - halfWidth) - flatHalfWidth;
+                    float outside = (float) Math.hypot(Math.max(qx, 0f), Math.max(qy, 0f));
+                    float signedDistance = outside + Math.min(Math.max(qx, qy), 0f) - radius;
+                    if (signedDistance > 0f) continue;
+                    float glow = TargetGlowModel.innerGlowAlpha(-signedDistance, glowDepth);
+                    if (glow <= 0f) continue;
+                    float colorPosition = (localX * width + localY * height) / projectionDenominator;
+                    int color = TargetGlowModel.gradientColor(colorPosition);
+                    int alpha = Math.round(205f * glow);
+                    pixels[y * width + x] = Color.argb(alpha,
+                            Color.red(color), Color.green(color), Color.blue(color));
+                }
+            }
+            targetGlowBitmap.setPixels(pixels, 0, width, 0, 0, width, height);
+            targetGlowBitmapGeneration = targetVisualState.generation;
+        }
+
+        private void recycleTargetGlowBitmap() {
+            targetGlowBitmapGeneration = -1L;
+            if (targetGlowBitmap == null) return;
+            targetGlowBitmap.recycle();
+            targetGlowBitmap = null;
         }
 
         private void drawTaskProgress(Canvas canvas, List<TaskProgressModel.Row> rows,

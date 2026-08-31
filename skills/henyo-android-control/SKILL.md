@@ -276,6 +276,13 @@ bin/henyo swipe 540 1800 540 900 300 --coordinate-space screenshot \
   --capture-id CAPTURE_ID --intent "スクリーンショット上の範囲をスクロールします"
 ```
 
+When several application windows are present, add `--package PACKAGE` to
+`find`, `click`, `observe`, `screenshot`, `tap`, or `swipe`. Add
+`--window-id ID` and `--display-id ID` when one package owns more than one
+candidate window. UI-node operations can re-resolve a recreated window inside
+the same package; screenshot-derived coordinates cannot and require a fresh
+capture when the window identity or geometry changes.
+
 Never reuse a capture id with another screenshot. Mappings live only in the
 current accessibility-service epoch and expire after 120 seconds. Capture a
 fresh screenshot when the mapping is missing or uncertain, the service has
