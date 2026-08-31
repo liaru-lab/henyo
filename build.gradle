@@ -141,6 +141,8 @@ tasks.register("verifyWindowTargetResolver", Exec) {
     inputs.file("src/test/java/link/liaru/henyo/TargetGlowModelTest.java")
     inputs.file("src/main/java/link/liaru/henyo/ScreenshotCaptureMode.java")
     inputs.file("src/test/java/link/liaru/henyo/ScreenshotCaptureModeTest.java")
+    inputs.file("src/main/java/link/liaru/henyo/TargetPresentationPolicy.java")
+    inputs.file("src/test/java/link/liaru/henyo/TargetPresentationPolicyTest.java")
     commandLine "bash", "scripts/verify-window-target-resolver.sh"
 }
 

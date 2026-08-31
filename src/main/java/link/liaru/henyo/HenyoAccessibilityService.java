@@ -1910,6 +1910,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Rect bounds = new Rect();
         window.getBoundsInScreen(bounds);
         Region actionableRegion = new Region(bounds);
+        Region presentationRegion = new Region(bounds);
         int targetLayer = window.getLayer();
         for (int i = 0; i < windows.size(); i++) {
             AccessibilityWindowInfo blocker = windows.get(i);
@@ -1925,9 +1926,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
             Region blockerRegion = new Region();
             blocker.getRegionInScreen(blockerRegion);
             actionableRegion.op(blockerRegion, Region.Op.DIFFERENCE);
+            Rect blockerBounds = blockerRegion.getBounds();
+            boolean retainedChrome = TargetPresentationPolicy.retainsSystemChrome(
+                    bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    blockerBounds.left, blockerBounds.top, blockerBounds.right, blockerBounds.bottom,
+                    blocker.getType() == AccessibilityWindowInfo.TYPE_SYSTEM);
+            if (!retainedChrome) presentationRegion.op(blockerRegion, Region.Op.DIFFERENCE);
         }
         return new TargetSnapshot(root, selectedCandidate.packageName, windowId, displayId,
-                bounds, actionableRegion);
+                bounds, actionableRegion, presentationRegion);
     }
 
     private void acceptResolvedTarget(TargetSnapshot target) {
@@ -1935,7 +1942,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         preferredTargetWindowId = target.windowId;
         preferredTargetDisplayId = target.displayId;
         lastTargetContextId = currentTargetContextId();
-        updateTargetOverlay(target.windowId, target.displayId, target.bounds, target.actionableRegion);
+        updateTargetOverlay(target.windowId, target.displayId, target.bounds, target.presentationRegion);
         targetHistoryStore.record(lastTargetContextId, target.toHint(), SystemClock.elapsedRealtime());
     }
 
@@ -1957,7 +1964,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         recycleWindows(windows);
     }
 
-    private void updateTargetOverlay(int windowId, int displayId, Rect bounds, Region actionableRegion) {
+    private void updateTargetOverlay(int windowId, int displayId, Rect bounds, Region presentationRegion) {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay == null) return;
         DisplayManager manager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -1967,7 +1974,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
             metrics.setTo(getResources().getDisplayMetrics());
         }
-        overlay.setTargetWindow(windowId, displayId, bounds, actionableRegion,
+        overlay.setTargetWindow(windowId, displayId, bounds, presentationRegion,
                 metrics.widthPixels, metrics.heightPixels, metrics.density);
     }
 
@@ -3018,15 +3025,17 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final int displayId;
         final Rect bounds;
         final Region actionableRegion;
+        final Region presentationRegion;
 
         TargetSnapshot(AccessibilityNodeInfo root, String packageName, int windowId, int displayId,
-                       Rect bounds, Region actionableRegion) {
+                       Rect bounds, Region actionableRegion, Region presentationRegion) {
             this.root = root;
             this.packageName = packageName == null ? "" : packageName;
             this.windowId = windowId;
             this.displayId = displayId;
             this.bounds = new Rect(bounds);
             this.actionableRegion = new Region(actionableRegion);
+            this.presentationRegion = new Region(presentationRegion);
         }
 
         TargetRef ref() {

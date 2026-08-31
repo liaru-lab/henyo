@@ -243,10 +243,10 @@ final class ConnectionStatusOverlay {
         postVisual(() -> visualModel.beginScan(logicalId, SystemClock.uptimeMillis()));
     }
 
-    void setTargetWindow(int windowId, int displayId, Rect bounds, Region actionableRegion,
+    void setTargetWindow(int windowId, int displayId, Rect bounds, Region presentationRegion,
                          int displayWidth, int displayHeight, float density) {
         Rect boundsCopy = bounds == null ? new Rect() : new Rect(bounds);
-        Region regionCopy = actionableRegion == null ? new Region() : new Region(actionableRegion);
+        Region regionCopy = presentationRegion == null ? new Region() : new Region(presentationRegion);
         mainHandler.post(() -> {
             if (destroyed) return;
             boolean displayChanged = targetVisualState.displayId != displayId;
@@ -723,9 +723,9 @@ final class ConnectionStatusOverlay {
     /** Geometry is controller-owned so screenshot detach/restore preserves motion. */
     private static final class TargetVisualState {
         final Rect bounds = new Rect();
-        final Region actionableRegion = new Region();
+        final Region presentationRegion = new Region();
         final Path outline = new Path();
-        final Path actionableClip = new Path();
+        final Path presentationClip = new Path();
         int windowId = -1;
         int displayId = Display.DEFAULT_DISPLAY;
         int displayWidth;
@@ -737,24 +737,24 @@ final class ConnectionStatusOverlay {
         void set(int newWindowId, int newDisplayId, Rect newBounds, Region newRegion,
                  int newDisplayWidth, int newDisplayHeight, float newDensity) {
             if (valid && windowId == newWindowId && displayId == newDisplayId
-                    && bounds.equals(newBounds) && actionableRegion.equals(newRegion)
+                    && bounds.equals(newBounds) && presentationRegion.equals(newRegion)
                     && displayWidth == newDisplayWidth && displayHeight == newDisplayHeight
                     && Float.compare(density, Math.max(0.5f, newDensity)) == 0) return;
             windowId = newWindowId;
             displayId = newDisplayId;
             bounds.set(newBounds);
-            actionableRegion.set(newRegion);
+            presentationRegion.set(newRegion);
             displayWidth = newDisplayWidth;
             displayHeight = newDisplayHeight;
             density = Math.max(0.5f, newDensity);
-            valid = windowId >= 0 && !bounds.isEmpty() && !actionableRegion.isEmpty();
+            valid = windowId >= 0 && !bounds.isEmpty() && !presentationRegion.isEmpty();
             outline.reset();
-            actionableClip.reset();
+            presentationClip.reset();
             if (valid) {
                 float radius = Math.min(14f * density,
                         Math.min(bounds.width(), bounds.height()) * 0.08f);
                 outline.addRoundRect(new RectF(bounds), radius, radius, Path.Direction.CW);
-                actionableRegion.getBoundaryPath(actionableClip);
+                presentationRegion.getBoundaryPath(presentationClip);
             }
             generation++;
         }
@@ -763,9 +763,9 @@ final class ConnectionStatusOverlay {
             valid = false;
             windowId = -1;
             bounds.setEmpty();
-            actionableRegion.setEmpty();
+            presentationRegion.setEmpty();
             outline.reset();
-            actionableClip.reset();
+            presentationClip.reset();
             generation++;
         }
     }
@@ -1309,7 +1309,7 @@ final class ConnectionStatusOverlay {
 
             ensureTargetGlowBitmap(depth);
             int saved = canvas.save();
-            canvas.clipPath(targetVisualState.actionableClip);
+            canvas.clipPath(targetVisualState.presentationClip);
             if (targetGlowBitmap != null) {
                 targetGlowBitmapPaint.setAlpha(Math.round(245f * intensity));
                 canvas.drawBitmap(targetGlowBitmap, bounds.left, bounds.top, targetGlowBitmapPaint);
