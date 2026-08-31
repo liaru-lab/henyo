@@ -111,6 +111,16 @@ Protocol-v1 endpoints may add `contractRevision`, `platform`, and
 Android greeting. The helper's `session.status` checkpoint accepts the
 additive fields only as a complete validated tuple and never republishes
 unknown capability data.
+Current Android also publishes its installed `application` identity/version
+and the complete capability tuple, for example:
+
+```json
+{"type":"event","event":"session.ready","protocolVersion":1,"serviceEpoch":"opaque","application":{"id":"link.liaru.henyo","versionName":"0.4.0","versionCode":14},"contractRevision":"remote-control.core/1.0.0","platform":{"name":"android","version":"16"},"capabilities":{"profile":"remote-control.core/1","features":["windowTargeting","explicitCaptureMode","displayTargeting","displayCapture","screenshotCoordinates","windowCapture"],"limits":{},"operations":{}}}
+```
+
+`application` describes the installed APK and is informational. Clients must
+use advertised capabilities, rather than comparing `versionName` or
+`versionCode`, when deciding whether an operation is supported.
 The iPhone greeting additionally carries `deviceReady`, bounded `deviceState`,
 and optional bounded `operatorAction`; the helper validates these together and
 clears them with the rest of the session checkpoint on disconnect. Legacy
@@ -610,6 +620,12 @@ ten minutes to accommodate reconnects, then expires if the client does not
 return. Every use is checked against the current accessibility-window list;
 Android node and window objects are never retained in the history.
 
+Successful targeted operations include the resolved `target` object in their
+result. Clients should carry that package/window/display tuple into subsequent
+operations. After an app launch or a stale window id, discard the old window id
+and re-observe using the stable package; Henyo may then bind the recreated
+window. A package-less stale window id is never rebound.
+
 ### Screenshot coordinates
 
 `screen.screenshot` and the nested screenshot in `ui.observe` include a
@@ -635,6 +651,15 @@ Android node and window objects are never retained in the history.
   "boundsSource": "accessibility_window"
 }
 ```
+
+Screenshot calls accept `captureMode:"auto"`, `"window"`, or `"display"`.
+Omitted or `auto` preserves the legacy choice: Android 14+ uses a window capture
+when the indicator need not be included, while older Android or
+`includeIndicator:true` uses display capture. Explicit `window` never silently
+falls back to the display and returns `unsupported_window_capture` when the
+platform cannot provide it. Explicit `display` returns the fully composited
+display. `includeIndicator` controls overlay inclusion independently where the
+chosen capture path can support it.
 
 Coordinates inferred from that bitmap must be sent with both
 `"coordinateSpace":"screenshot"` and its `captureId`. For example:

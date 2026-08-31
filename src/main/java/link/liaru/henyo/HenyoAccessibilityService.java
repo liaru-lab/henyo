@@ -6,6 +6,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -60,6 +61,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 public class HenyoAccessibilityService extends AccessibilityService {
+    private static final int PROTOCOL_VERSION = 1;
+    private static final String CONTRACT_REVISION = "remote-control.core/1.0.0";
+    private static final String CAPABILITY_PROFILE = "remote-control.core/1";
     private static final Pattern EMAIL = Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}");
     private static final Pattern PHONE = Pattern.compile("\\+?[0-9][0-9 .()_-]{7,}[0-9]");
     private static final int ENDPOINT_LIMITED_HEALTH = 1;
@@ -512,8 +516,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         registerWsSession(session);
         attachTargetHistory(session);
         try {
-            session.sendText("{\"type\":\"event\",\"event\":\"session.ready\",\"protocolVersion\":1,\"requiresAuth\":" +
-                    !authenticated + ",\"serviceEpoch\":\"" + escape(serviceEpoch) + "\"}");
+            session.sendText(sessionReadyJson(authenticated));
             if (authenticated) {
                 session.sendText("{\"type\":\"event\",\"event\":\"session.authenticated\"}");
             }
@@ -548,8 +551,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 if ("ping".equals(type)) {
                     session.sendText("{\"type\":\"pong\",\"id\":\"" + escape(id) + "\"}");
                 } else if ("hello".equals(type)) {
-                    session.sendText("{\"type\":\"event\",\"event\":\"session.ready\",\"protocolVersion\":1,\"requiresAuth\":" +
-                            !authenticated + ",\"serviceEpoch\":\"" + escape(serviceEpoch) + "\"}");
+                    session.sendText(sessionReadyJson(authenticated));
                 } else if ("auth".equals(type)) {
                     BearerTokenManager.Verification verification = tokens().verify(message.get("token"), sourceAddress.getHostAddress());
                     if (verification.ok) {
@@ -1618,10 +1620,49 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String watchdog = tailscaleWatchdog == null
                 ? TailscaleWatchdog.disabledStatusJson(this)
                 : tailscaleWatchdog.statusJson();
-        return json(200, "{\"ok\":true,\"service\":\"connected\",\"lastEventTime\":" + lastEventTime +
+        return json(200, "{\"ok\":true,\"service\":\"connected\",\"application\":" + applicationJson() +
+                ",\"protocol\":{\"version\":" + PROTOCOL_VERSION +
+                ",\"contractRevision\":\"" + CONTRACT_REVISION + "\"}" +
+                ",\"capabilities\":" + capabilitiesJson() + ",\"lastEventTime\":" + lastEventTime +
                 ",\"remoteAccess\":" + withTokenCount(config.summaryJson(activeBindHost, activeRemoteServing)) +
                 ",\"webSocket\":{\"endpoint\":\"/v1/ws/control\",\"activeSessions\":" + activeWsSessions + "}" +
                 ",\"tailscaleWatchdog\":" + watchdog + "}");
+    }
+
+    private String sessionReadyJson(boolean authenticated) {
+        return "{\"type\":\"event\",\"event\":\"session.ready\",\"protocolVersion\":" + PROTOCOL_VERSION +
+                ",\"requiresAuth\":" + !authenticated +
+                ",\"serviceEpoch\":\"" + escape(serviceEpoch) + "\"" +
+                ",\"application\":" + applicationJson() +
+                ",\"contractRevision\":\"" + CONTRACT_REVISION + "\"" +
+                ",\"platform\":{\"name\":\"android\",\"version\":\"" + escape(Build.VERSION.RELEASE) + "\"}" +
+                ",\"capabilities\":" + capabilitiesJson() + "}";
+    }
+
+    private String applicationJson() {
+        String versionName = "unknown";
+        long versionCode = 0L;
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            versionName = info.versionName == null || info.versionName.isEmpty()
+                    ? "unknown" : info.versionName;
+            versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            // The running service package should always resolve; bounded empty metadata is safer.
+        }
+        return "{\"id\":\"" + escape(getPackageName()) + "\",\"versionName\":\"" +
+                escape(versionName) + "\",\"versionCode\":" + Math.max(0L, versionCode) + "}";
+    }
+
+    private static String capabilitiesJson() {
+        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\"");
+        if (Build.VERSION.SDK_INT >= 30) {
+            features.append(",\"displayTargeting\",\"displayCapture\",\"screenshotCoordinates\"");
+        }
+        if (Build.VERSION.SDK_INT >= 34) features.append(",\"windowCapture\"");
+        features.append("]");
+        return "{\"profile\":\"" + CAPABILITY_PROFILE + "\",\"features\":" + features +
+                ",\"limits\":{},\"operations\":{}}";
     }
 
     private Response remoteAccessStatus() {
@@ -2042,9 +2083,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
         SearchOptions options = SearchOptions.from(params);
         Match match = findMatch(options, constraint);
         if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
+        String targetJson = match.target == null ? "null" : match.target.toJson();
         ClickResult result = clickMatch(match);
         match.recycle();
-        return json(200, "{\"ok\":" + result.ok + ",\"strategy\":\"" + result.strategy + "\"}");
+        return json(200, "{\"ok\":" + result.ok + ",\"strategy\":\"" + result.strategy +
+                "\",\"target\":" + targetJson + "}");
     }
 
     private Response clickV1(Map<String, String> params) {
@@ -2093,9 +2136,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         showPointGesture(match.centerX(), match.centerY());
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, clear ? value : match.text + value);
+        String targetJson = match.target == null ? "null" : match.target.toJson();
         boolean ok = match.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
         match.recycle();
-        return json(200, "{\"ok\":" + ok + "}");
+        return json(200, "{\"ok\":" + ok + ",\"target\":" + targetJson + "}");
     }
 
     private Response targetConstraintError(OperationTargetConstraint constraint) {
@@ -2111,7 +2155,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String blocked = gestureBlockReason(point.target, point.x, point.y);
         if (!blocked.isEmpty()) return coordinateError(CoordinateResolution.error(blocked));
         boolean ok = tap(point.target, point.x, point.y);
-        return json(200, "{\"ok\":" + ok + point.resultMetadata() + "}");
+        return json(200, "{\"ok\":" + ok + ",\"target\":" + point.target.toJson() +
+                point.resultMetadata() + "}");
     }
 
     private Response swipeResponse(Map<String, String> params) {
@@ -2133,7 +2178,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             if (!blocked.isEmpty()) return coordinateError(CoordinateResolution.error(blocked));
         }
         boolean ok = swipe(start.target, start.x, start.y, end.x, end.y, duration);
-        return json(200, "{\"ok\":" + ok +
+        return json(200, "{\"ok\":" + ok + ",\"target\":" + start.target.toJson() +
                 (start.transformed ? ",\"coordinateSpace\":\"screenshot\",\"screenX1\":" + start.x +
                         ",\"screenY1\":" + start.y + ",\"screenX2\":" + end.x + ",\"screenY2\":" + end.y : "") + "}");
     }
@@ -2204,7 +2249,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         boolean ok = "up".equals(direction)
                 ? swipe(target, x, top, x, bottom, intParam(params, "duration", 350))
                 : swipe(target, x, bottom, x, top, intParam(params, "duration", 350));
-        return json(200, "{\"ok\":" + ok + "}");
+        return json(200, "{\"ok\":" + ok + ",\"target\":" + target.toJson() + "}");
     }
 
     private Response scrollUntilText(Map<String, String> params) {
@@ -2322,10 +2367,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Response appCurrent() {
-        AccessibilityNodeInfo root = resolvedTargetRoot();
-        if (root == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
+        TargetSnapshot target = resolveTarget();
+        if (target == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
+        AccessibilityNodeInfo root = target.root;
         try {
-            return json(200, "{\"ok\":true,\"package\":\"" + escape(str(root.getPackageName())) + "\",\"className\":\"" + escape(str(root.getClassName())) + "\"}");
+            return json(200, "{\"ok\":true,\"package\":\"" + escape(str(root.getPackageName())) +
+                    "\",\"className\":\"" + escape(str(root.getClassName())) +
+                    "\",\"target\":" + target.ref().toJson() + "}");
         } finally {
             root.recycle();
         }
@@ -2424,7 +2472,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private Response screenshot(Map<String, String> params) {
         ScreenshotCapture capture = captureScreenshot(params);
         if (capture.bytes == null) {
-            int status = "unsupported_api_level".equals(capture.error) ? 501
+            int status = "unsupported_api_level".equals(capture.error)
+                    || "unsupported_window_capture".equals(capture.error) ? 501
+                    : "invalid_capture_mode".equals(capture.error) ? 400
+                    : "target_not_found".equals(capture.error) ? 404
                     : "timeout".equals(capture.error) ? 504 : 500;
             return json(status, "{\"ok\":false,\"error\":\"" + escape(capture.error == null ? "capture_failed" : capture.error) + "\"}");
         }
@@ -2454,7 +2505,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         boolean includeIndicator = boolParam(params, "includeIndicator", false);
-        int screenshotWindowId = -1;
+        ScreenshotCaptureMode.Resolution captureMode = ScreenshotCaptureMode.resolve(
+                params.get("captureMode"), Build.VERSION.SDK_INT, includeIndicator);
+        if (!captureMode.ok) {
+            requestedTarget.root.recycle();
+            capture.error = captureMode.error;
+            capture.endElapsedRealtimeMs = SystemClock.elapsedRealtime();
+            return capture;
+        }
+        int screenshotWindowId = captureMode.windowScoped() ? requestedTarget.windowId : -1;
         int screenshotDisplayId = preferredTargetDisplayId;
         String screenshotPackageName = requestedTarget.packageName;
         Rect rootBounds = new Rect();
@@ -2462,9 +2521,6 @@ public class HenyoAccessibilityService extends AccessibilityService {
         capture.targetBounds = new Rect(requestedTarget.bounds);
         capture.targetWindowId = requestedTarget.windowId;
         screenshotDisplayId = requestedTarget.displayId;
-        if (!includeIndicator && Build.VERSION.SDK_INT >= 34) {
-            screenshotWindowId = requestedTarget.windowId;
-        }
         requestedTarget.root.recycle();
         boolean windowScopedCapture = screenshotWindowId >= 0;
         capture.packageName = screenshotPackageName;

@@ -27,6 +27,12 @@ class HelperTargetMismatchError(RuntimeError):
         self.response = response
 
 
+class HelperCallError(RuntimeError):
+    def __init__(self, response: Dict[str, Any]):
+        super().__init__(dumps(response))
+        self.response = response
+
+
 def dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
@@ -84,18 +90,41 @@ def selector(text: str, args: List[str]) -> Dict[str, Any]:
             out["field"] = args[i]
         elif args[i] == "--clickable-only":
             out["clickableOnly"] = True
-        elif args[i] in ("--package", "--window-id", "--display-id"):
-            option = args[i]
+        elif args[i] == "--redact":
+            pass
+        else:
+            raise SystemExit(f"unknown selector option: {args[i]}")
+        i += 1
+    return out
+
+
+def target_options(argv: List[str]) -> tuple[List[str], Dict[str, Any]]:
+    rest: List[str] = []
+    target: Dict[str, Any] = {}
+    i = 0
+    while i < len(argv):
+        option = argv[i]
+        if option in ("--package", "--window-id", "--display-id"):
             i += 1
-            if i >= len(args):
+            if i >= len(argv):
                 raise SystemExit(f"{option} requires a value")
             key = {"--package": "package", "--window-id": "windowId",
                    "--display-id": "displayId"}[option]
-            out[key] = args[i] if option == "--package" else int(args[i])
-        elif args[i] == "--redact":
-            pass
+            try:
+                target[key] = argv[i] if option == "--package" else int(argv[i])
+            except ValueError as exc:
+                raise SystemExit(f"{option} requires a non-negative integer") from exc
+            if option != "--package" and target[key] < 0:
+                raise SystemExit(f"{option} requires a non-negative integer")
+        else:
+            rest.append(option)
         i += 1
-    return out
+    return rest, target
+
+
+def selector_call_params(text: str, argv: List[str]) -> Dict[str, Any]:
+    rest, target = target_options(argv)
+    return {"selector": selector(text, rest), **target}
 
 
 def intent_options(argv: List[str]) -> tuple[List[str], Dict[str, str] | None]:
@@ -438,6 +467,7 @@ def current(argv: List[str] | None = None, display: Dict[str, str] | None = None
 
 def tree(argv: List[str] | None = None, display: Dict[str, str] | None = None) -> int:
     request, rest = cache_request_options(argv or [])
+    rest, target = target_options(rest)
     max_depth = 8
     if rest:
         if len(rest) != 1:
@@ -445,13 +475,17 @@ def tree(argv: List[str] | None = None, display: Dict[str, str] | None = None) -
         max_depth = int(rest[0])
     request.update({
         "cmd": "tree",
-        "params": {"maxDepth": max_depth},
+        "params": {"maxDepth": max_depth, **target},
     })
     response = helper_request(add_display(request, display))
     if response.get("cached") and isinstance(response.get("tree"), dict):
         tree_event = response["tree"]
         if isinstance(tree_event.get("root"), dict):
-            return print_json({"ok": True, "root": tree_event["root"], "truncated": tree_event.get("truncated", False)})
+            output = {"ok": True, "root": tree_event["root"],
+                      "truncated": tree_event.get("truncated", False)}
+            if isinstance(tree_event.get("target"), dict):
+                output["target"] = tree_event["target"]
+            return print_json(output)
         if isinstance(tree_event.get("payload"), dict):
             return print_json(tree_event["payload"])
     result = response.get("result")
@@ -463,7 +497,8 @@ def tree(argv: List[str] | None = None, display: Dict[str, str] | None = None) -
 
 
 def observe(argv: List[str], display: Dict[str, str] | None = None) -> int:
-    params: Dict[str, Any] = {}
+    argv, target = target_options(argv)
+    params: Dict[str, Any] = dict(target)
     i = 0
     while i < len(argv):
         option = argv[i]
@@ -477,13 +512,15 @@ def observe(argv: List[str], display: Dict[str, str] | None = None) -> int:
                 "--timeout": "timeout",
             }[option]
             params[key] = int(argv[i])
-        elif option in ("--package", "--window-id", "--display-id"):
+        elif option == "--capture-mode":
             i += 1
             if i >= len(argv):
-                raise SystemExit(f"{option} requires a value")
-            key = {"--package": "package", "--window-id": "windowId",
-                   "--display-id": "displayId"}[option]
-            params[key] = argv[i] if option == "--package" else int(argv[i])
+                raise SystemExit("--capture-mode requires auto, window, or display")
+            if argv[i] not in ("auto", "window", "display"):
+                raise SystemExit("--capture-mode requires auto, window, or display")
+            params["captureMode"] = argv[i]
+        elif option == "--include-indicator":
+            params["includeIndicator"] = True
         else:
             raise SystemExit(f"unknown observe option: {option}")
         i += 1
@@ -527,6 +564,8 @@ def observe(argv: List[str], display: Dict[str, str] | None = None) -> int:
             if key in screenshot_result
         },
     }
+    if isinstance(tree_result.get("target"), dict):
+        summary["target"] = tree_result["target"]
     return print_json(summary)
 
 
@@ -729,7 +768,7 @@ def screenshot_payload_via_helper(
         raise HelperTargetMismatchError(response)
     result = response.get("result") if isinstance(response, dict) else None
     if not isinstance(result, dict) or not result.get("ok"):
-        raise RuntimeError(dumps(response))
+        raise HelperCallError(response)
     if result.get("contentType") != "image/png" or result.get("encoding") != "base64":
         raise RuntimeError("unsupported_screenshot_payload")
     return result
@@ -760,6 +799,13 @@ def screenshot(
             i += 1; timeout = argv[i]
         elif argv[i] == "--json":
             json_output = True
+        elif argv[i] == "--capture-mode":
+            i += 1
+            if i >= len(argv) or argv[i] not in ("auto", "window", "display"):
+                raise SystemExit("--capture-mode requires auto, window, or display")
+            target["captureMode"] = argv[i]
+        elif argv[i] == "--include-indicator":
+            target["includeIndicator"] = True
         elif argv[i] in ("--package", "--window-id", "--display-id"):
             option = argv[i]
             i += 1
@@ -785,6 +831,12 @@ def screenshot(
         if isinstance(result.get("coordinates"), dict):
             coordinates = result["coordinates"]
     except HelperTargetMismatchError as exc:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        return print_json(exc.response)
+    except HelperCallError as exc:
         try:
             tmp.unlink()
         except FileNotFoundError:
@@ -826,38 +878,49 @@ def v1_cmd(argv: List[str], display: Dict[str, str] | None = None) -> int:
     if sub == "observe":
         return observe(rest, display)
     if sub == "find":
-        return control_call("ui.find", {"selector": selector(rest[0], rest[1:])}, display)
+        return control_call("ui.find", selector_call_params(rest[0], rest[1:]), display)
     if sub == "click":
-        return control_call("ui.click", {"selector": selector(rest[0], rest[1:])}, display)
+        return control_call("ui.click", selector_call_params(rest[0], rest[1:]), display)
     if sub == "click-point":
-        return control_call("ui.click", {"x": int(rest[0]), "y": int(rest[1])}, display)
+        options, target = target_options(rest[2:])
+        if options: raise SystemExit(f"unknown click-point option: {options[0]}")
+        return control_call("ui.click", {"x": int(rest[0]), "y": int(rest[1]), **target}, display)
     if sub == "click-bounds":
-        return control_call("ui.click", {"bounds": ",".join(rest[:4])}, display)
+        options, target = target_options(rest[4:])
+        if options: raise SystemExit(f"unknown click-bounds option: {options[0]}")
+        return control_call("ui.click", {"bounds": ",".join(rest[:4]), **target}, display)
     if sub == "set":
-        return control_call("ui.setText", {"selector": {"text": rest[0]}, "value": rest[1]}, display)
+        params = selector_call_params(rest[0], rest[2:])
+        params["value"] = rest[1]
+        return control_call("ui.setText", params, display)
     if sub == "tap":
         return control_call("ui.tap", coordinate_gesture_params("tap", rest), display)
     if sub == "swipe":
         return control_call("ui.swipe", coordinate_gesture_params("swipe", rest), display)
     if sub == "scroll":
-        return control_call("ui.scroll", {"direction": rest[0] if rest else "down"}, display)
+        options, target = target_options(rest)
+        if len(options) > 1: raise SystemExit(f"unknown scroll option: {options[1]}")
+        return control_call("ui.scroll", {"direction": options[0] if options else "down", **target}, display)
     if sub == "scroll-until":
+        options, target = target_options(rest[1:])
         attempts = 8
-        if len(rest) > 2 and rest[1] == "--attempts":
-            attempts = int(rest[2])
-        return control_call("ui.scrollUntil", {"text": rest[0], "attempts": attempts}, display)
+        if options:
+            if len(options) != 2 or options[0] != "--attempts":
+                raise SystemExit(f"unknown scroll-until option: {options[0]}")
+            attempts = int(options[1])
+        return control_call("ui.scrollUntil", {"text": rest[0], "attempts": attempts, **target}, display)
     if sub == "wait":
         timeout = 5000; interval = 100; opts = []
-        text = rest[0]; i = 1
-        while i < len(rest):
-            if rest[i] == "--timeout":
-                i += 1; timeout = int(rest[i])
-            elif rest[i] == "--interval":
-                i += 1; interval = int(rest[i])
+        text = rest[0]; wait_args, target = target_options(rest[1:]); i = 0
+        while i < len(wait_args):
+            if wait_args[i] == "--timeout":
+                i += 1; timeout = int(wait_args[i])
+            elif wait_args[i] == "--interval":
+                i += 1; interval = int(wait_args[i])
             else:
-                opts.append(rest[i])
+                opts.append(wait_args[i])
             i += 1
-        return control_call("ui.wait", {"selector": selector(text, opts), "timeout": timeout, "interval": interval}, display)
+        return control_call("ui.wait", {"selector": selector(text, opts), "timeout": timeout, "interval": interval, **target}, display)
     if sub == "launch":
         return control_call("app.launch", {"package": rest[0]}, display)
     if sub == "start":
@@ -869,6 +932,23 @@ def v1_cmd(argv: List[str], display: Dict[str, str] | None = None) -> int:
     if sub == "screenshot":
         return screenshot(rest, display=display)
     usage(); return 2
+
+
+def version_cmd() -> int:
+    response = helper_request({"cmd": "session.status"})
+    if not response.get("ok"):
+        return print_json(response)
+    application = response.get("application") if isinstance(response.get("application"), dict) else None
+    protocol = {"version": response.get("protocolVersion")}
+    if isinstance(response.get("contractRevision"), str):
+        protocol["contractRevision"] = response["contractRevision"]
+    return print_json({
+        "ok": True,
+        "application": application,
+        "protocol": protocol,
+        "platform": response.get("platform") if isinstance(response.get("platform"), dict) else None,
+        "capabilities": response.get("capabilities") if isinstance(response.get("capabilities"), dict) else None,
+    })
 
 
 def usage() -> None:
@@ -888,14 +968,15 @@ def usage() -> None:
   henyo chrome cdp prepare [--adb SERIAL] [--port PORT] [--package PACKAGE] [--socket NAME] [--timeout MS] [--include-targets]
   henyo apps [--all]
   henyo open-uri URI [--package PACKAGE] [--intent TEXT]
+  henyo version
   henyo health
   henyo v1 health|tree|observe|find|click|current|back|home|screenshot ...
-  henyo tree [DEPTH] [--fresh] [--max-age MS]
+  henyo tree [DEPTH] [--fresh] [--max-age MS] [--package PACKAGE] [--window-id ID] [--display-id ID]
   henyo current [--fresh] [--max-age MS]
   henyo observe [--max-depth N] [--max-attempts N] [--timeout MS] [--intent TEXT]
   henyo tap X Y [--coordinate-space screen|screenshot] [--capture-id ID] [--intent TEXT]
   henyo swipe X1 Y1 X2 Y2 [DURATION] [--coordinate-space screen|screenshot] [--capture-id ID] [--intent TEXT]
-  henyo screenshot [--ttl SECONDS] [--prefix NAME] [--timeout MS] [--json] [--intent TEXT]
+  henyo screenshot [--ttl SECONDS] [--prefix NAME] [--timeout MS] [--json] [--capture-mode auto|window|display] [--intent TEXT]
   henyo find|click|wait|set|scroll|scroll-until|launch|start|back|home ... [--intent TEXT]
 """)
 
@@ -987,6 +1068,10 @@ def main(argv=None) -> int:
         return chrome_cmd(rest)
     if cmd == "v1":
         return v1_cmd(rest)
+    if cmd == "version":
+        if rest:
+            raise SystemExit(f"unknown version option: {rest[0]}")
+        return version_cmd()
     if cmd == "health":
         return print_json(json.loads(http_request("GET", "/v1/health").decode()))
     if cmd == "apps":
@@ -998,15 +1083,21 @@ def main(argv=None) -> int:
     if cmd == "observe":
         return observe(rest, display)
     if cmd == "find":
-        return control_call("ui.find", {"selector": selector(rest[0], rest[1:])}, display)
+        return control_call("ui.find", selector_call_params(rest[0], rest[1:]), display)
     if cmd == "click":
-        return control_call("ui.click", {"selector": selector(rest[0], rest[1:])}, display)
+        return control_call("ui.click", selector_call_params(rest[0], rest[1:]), display)
     if cmd == "wait":
         return v1_cmd(["wait", *rest], display)
     if cmd == "wait-gone":
-        return control_call("ui.wait", {"selector": {"text": rest[0]}, "gone": True, "timeout": int(rest[2]) if len(rest) > 2 and rest[1] == "--timeout" else 5000}, display)
+        wait_args, target = target_options(rest[1:])
+        timeout = int(wait_args[1]) if len(wait_args) == 2 and wait_args[0] == "--timeout" else 5000
+        if wait_args and not (len(wait_args) == 2 and wait_args[0] == "--timeout"):
+            raise SystemExit(f"unknown wait-gone option: {wait_args[0]}")
+        return control_call("ui.wait", {"selector": {"text": rest[0]}, "gone": True, "timeout": timeout, **target}, display)
     if cmd == "set":
-        return control_call("ui.setText", {"selector": {"text": rest[0]}, "value": rest[1]}, display)
+        params = selector_call_params(rest[0], rest[2:])
+        params["value"] = rest[1]
+        return control_call("ui.setText", params, display)
     if cmd == "tap":
         return control_call("ui.tap", coordinate_gesture_params("tap", rest), display)
     if cmd == "swipe":

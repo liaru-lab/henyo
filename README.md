@@ -349,6 +349,7 @@ launcher; on Windows PowerShell, replace `bin/henyo` with `.\bin\henyo.ps1`.
 bin/henyo helper start
 bin/henyo helper status
 bin/henyo helper reload-auth
+bin/henyo version
 bin/henyo cache tree
 bin/henyo cache clear
 bin/henyo batch batch.json
@@ -365,6 +366,7 @@ bin/henyo apps
 bin/henyo apps --all
 bin/henyo find Battery --exact
 bin/henyo click Battery --exact
+bin/henyo click Search --package com.example.maps --window-id 17 --display-id 0
 bin/henyo click Battery --exact --intent 'Battery設定を開きます'
 bin/henyo wait Battery --exact --timeout 5000
 bin/henyo launch com.android.settings
@@ -373,6 +375,18 @@ bin/henyo current
 bin/henyo back
 bin/henyo home
 ```
+
+Run `bin/henyo version` before using optional behavior. It reports the installed
+APK `versionName`/`versionCode`, protocol revision, Android platform, and
+advertised capabilities through the persistent helper. Gate behavior on
+capabilities, not APK version comparisons.
+
+Window-aware commands accept `--package`, `--window-id`, and `--display-id`.
+Use the resolved target returned by observation or a successful operation for
+the next call. Package is the stable recovery identity when Android recreates a
+window id. Screenshots additionally accept `--capture-mode window|display|auto`:
+window is the target client region with coordinate metadata, display is the
+fully composited user-visible screen, and auto preserves legacy behavior.
 
 The helper returns cached `tree` and `current` data for at most 1000 ms by
 default. Use `--fresh` (or `HENYO_FRESH=1`) to bypass that cache, and use
