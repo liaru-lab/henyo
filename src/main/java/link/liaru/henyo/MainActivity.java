@@ -23,7 +23,11 @@ import android.widget.TextView;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class MainActivity extends Activity {
     private static final int ID_BIND_LOCALHOST = 1001;
@@ -35,6 +39,7 @@ public class MainActivity extends Activity {
     private final Runnable refresh = this::updateStatus;
 
     private TextView status;
+    private TextView excludedAppsSummary;
     private TextView pairingStatus;
     private TextView pairingCode;
     private TextView pairingNextCode;
@@ -61,6 +66,17 @@ public class MainActivity extends Activity {
         root.addView(sectionTitle("Henyo Accessibility Bridge"));
         status = bodyText();
         root.addView(status);
+
+        root.addView(sectionTitle("Targeting"));
+        TextView targetingHelp = bodyText();
+        targetingHelp.setText("Henyo will not choose excluded apps as automation targets. This changes target selection only; it does not hide those windows from Android.");
+        root.addView(targetingHelp);
+        excludedAppsSummary = bodyText();
+        root.addView(excludedAppsSummary);
+        Button chooseExcludedApps = new Button(this);
+        chooseExcludedApps.setText("Choose Excluded Apps");
+        chooseExcludedApps.setOnClickListener((View v) -> showExcludedAppPicker());
+        root.addView(chooseExcludedApps);
 
         root.addView(sectionTitle("Remote Access"));
         remoteEnabled = new Switch(this);
@@ -165,6 +181,7 @@ public class MainActivity extends Activity {
 
         setContentView(scroll);
         loadRemoteAccessFields();
+        updateExcludedAppsSummary();
         updateStatus();
     }
 
@@ -205,6 +222,51 @@ public class MainActivity extends Activity {
             showMessage("Could not bind listener: " + e.getMessage());
         }
         updateStatus();
+    }
+
+    private void showExcludedAppPicker() {
+        PackageManager packageManager = getPackageManager();
+        List<TargetingApp> apps = new ArrayList<>();
+        for (android.content.pm.ApplicationInfo info : packageManager.getInstalledApplications(0)) {
+            if (info == null || info.packageName == null || info.packageName.equals(getPackageName())) continue;
+            String label = String.valueOf(info.loadLabel(packageManager));
+            if (label.trim().isEmpty()) label = info.packageName;
+            apps.add(new TargetingApp(label, info.packageName));
+        }
+        Collections.sort(apps, Comparator
+                .comparing((TargetingApp app) -> app.label.toLowerCase(java.util.Locale.ROOT))
+                .thenComparing(app -> app.packageName));
+
+        Set<String> selected = new HashSet<>(ExcludedAppStore.load(this));
+        CharSequence[] labels = new CharSequence[apps.size()];
+        boolean[] checked = new boolean[apps.size()];
+        for (int i = 0; i < apps.size(); i++) {
+            TargetingApp app = apps.get(i);
+            labels[i] = app.label + "\n" + app.packageName;
+            checked[i] = selected.contains(app.packageName);
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Excluded Apps")
+                .setMultiChoiceItems(labels, checked, (dialog, which, isChecked) -> {
+                    String packageName = apps.get(which).packageName;
+                    if (isChecked) selected.add(packageName);
+                    else selected.remove(packageName);
+                })
+                .setPositiveButton("Save", (dialog, which) -> {
+                    ExcludedAppStore.save(this, selected);
+                    updateExcludedAppsSummary();
+                    showMessage("Targeting exclusions saved.");
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void updateExcludedAppsSummary() {
+        int count = ExcludedAppStore.load(this).size();
+        excludedAppsSummary.setText(count == 0
+                ? "No apps are excluded."
+                : count + (count == 1 ? " app is excluded." : " apps are excluded."));
     }
 
     private void updateStatus() {
@@ -390,6 +452,16 @@ public class MainActivity extends Activity {
         long rest = safe % 60;
         if (minutes <= 0) return rest + "s";
         return minutes + "m " + String.format(java.util.Locale.ROOT, "%02d", rest) + "s";
+    }
+
+    private static final class TargetingApp {
+        final String label;
+        final String packageName;
+
+        TargetingApp(String label, String packageName) {
+            this.label = label;
+            this.packageName = packageName;
+        }
     }
 
     private void showMessage(String text) {

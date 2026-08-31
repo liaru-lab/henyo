@@ -11,6 +11,7 @@ import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.graphics.Region;
 import android.hardware.HardwareBuffer;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
@@ -23,6 +24,7 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.util.DisplayMetrics;
+import android.util.SparseArray;
 
 import java.io.IOException;
 import java.io.ByteArrayOutputStream;
@@ -115,6 +117,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private volatile long lastMajorUiEventAt;
     private volatile String lastObservedPackageName = "";
     private volatile String lastObservedClassName = "";
+    private volatile int preferredTargetWindowId = -1;
+    private volatile int preferredTargetDisplayId = Display.DEFAULT_DISPLAY;
     private long treeVersion;
     private long actionSeq;
     private volatile String serviceEpoch = "";
@@ -145,6 +149,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (event == null) return;
         long callbackStartedNanos = System.nanoTime();
         lastEventTime = System.currentTimeMillis();
+        String eventPackage = str(event.getPackageName());
+        if (!eventPackage.isEmpty() && !ExcludedAppStore.load(this).contains(eventPackage)
+                && event.getWindowId() >= 0) {
+            preferredTargetWindowId = event.getWindowId();
+            if (Build.VERSION.SDK_INT >= 30) preferredTargetDisplayId = event.getDisplayId();
+        }
         UiEventClassification classification = classifyUiEvent(event);
         if (classification.kind == UI_EVENT_NOISE) {
             performanceMetrics.recordAccessibility(classification.kind, SystemClock.uptimeMillis(),
@@ -1743,8 +1753,87 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 "}";
     }
 
+    private AccessibilityNodeInfo resolvedTargetRoot() {
+        ResolvedTarget target = resolveTarget();
+        return target == null ? null : target.root;
+    }
+
+    private ResolvedTarget resolveTarget() {
+        List<AccessibilityWindowInfo> windows = allWindows();
+        if (windows.isEmpty()) return null;
+        List<WindowTargetResolver.Candidate> candidates = new ArrayList<>();
+        for (AccessibilityWindowInfo window : windows) {
+            AccessibilityNodeInfo root = window == null ? null : window.getRoot();
+            String packageName = root == null ? "" : str(root.getPackageName());
+            candidates.add(new WindowTargetResolver.Candidate(
+                    window == null ? -1 : window.getId(),
+                    window == null || Build.VERSION.SDK_INT < 30
+                            ? Display.DEFAULT_DISPLAY : window.getDisplayId(),
+                    window == null ? Integer.MIN_VALUE : window.getLayer(),
+                    packageName,
+                    window != null && window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION,
+                    root != null,
+                    window != null && window.isActive(),
+                    window != null && window.isFocused()));
+            if (root != null) root.recycle();
+        }
+        int selected = WindowTargetResolver.select(candidates, ExcludedAppStore.load(this),
+                preferredTargetWindowId, preferredTargetDisplayId);
+        if (selected < 0) {
+            recycleWindows(windows);
+            return null;
+        }
+        AccessibilityWindowInfo window = windows.get(selected);
+        AccessibilityNodeInfo root = window.getRoot();
+        if (root == null) {
+            recycleWindows(windows);
+            return null;
+        }
+        int windowId = window.getId();
+        int displayId = Build.VERSION.SDK_INT >= 30 ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
+        preferredTargetWindowId = windowId;
+        preferredTargetDisplayId = displayId;
+        recycleWindows(windows);
+        return new ResolvedTarget(root, windowId, displayId);
+    }
+
+    private List<AccessibilityWindowInfo> allWindows() {
+        List<AccessibilityWindowInfo> out = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= 30) {
+            SparseArray<List<AccessibilityWindowInfo>> displays = getWindowsOnAllDisplays();
+            if (displays != null) {
+                for (int i = 0; i < displays.size(); i++) {
+                    List<AccessibilityWindowInfo> displayWindows = displays.valueAt(i);
+                    if (displayWindows != null) out.addAll(displayWindows);
+                }
+            }
+        } else {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows != null) out.addAll(windows);
+        }
+        return out;
+    }
+
+    private static void recycleWindows(List<AccessibilityWindowInfo> windows) {
+        for (AccessibilityWindowInfo window : windows) {
+            if (window != null) window.recycle();
+        }
+    }
+
+    private GestureDescription.Builder gestureBuilderForTarget() {
+        GestureDescription.Builder builder = new GestureDescription.Builder();
+        if (Build.VERSION.SDK_INT >= 30) {
+            ResolvedTarget target = resolveTarget();
+            if (target != null) {
+                builder.setDisplayId(target.displayId);
+                target.root.recycle();
+            }
+        }
+        return builder;
+    }
+
     private Response uiTree(Map<String, String> params) {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
         try {
             boolean redact = boolParam(params, "redact", false);
@@ -1770,7 +1859,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private boolean activeWindowContainsSensitiveUi() {
         if (Build.VERSION.SDK_INT < 34) return false;
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return false;
         try {
             return nodeTreeContainsSensitiveUi(root, 0, new int[]{2000});
@@ -2034,7 +2123,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Response appCurrent() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
         try {
             return json(200, "{\"ok\":true,\"package\":\"" + escape(str(root.getPackageName())) + "\",\"className\":\"" + escape(str(root.getClassName())) + "\"}");
@@ -2155,17 +2244,19 @@ public class HenyoAccessibilityService extends AccessibilityService {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         boolean includeIndicator = boolParam(params, "includeIndicator", false);
         int screenshotWindowId = -1;
+        int screenshotDisplayId = preferredTargetDisplayId;
         Rect rootBounds = new Rect();
         if (!includeIndicator && Build.VERSION.SDK_INT >= 34) {
-            AccessibilityNodeInfo activeRoot = getRootInActiveWindow();
-            if (activeRoot != null) {
-                screenshotWindowId = activeRoot.getWindowId();
-                activeRoot.getBoundsInScreen(rootBounds);
-                activeRoot.recycle();
+            ResolvedTarget target = resolveTarget();
+            if (target != null) {
+                screenshotWindowId = target.windowId;
+                screenshotDisplayId = target.displayId;
+                target.root.getBoundsInScreen(rootBounds);
+                target.root.recycle();
             }
         }
         boolean windowScopedCapture = screenshotWindowId >= 0;
-        prepareCaptureCoordinates(capture, windowScopedCapture, screenshotWindowId, rootBounds);
+        prepareCaptureCoordinates(capture, windowScopedCapture, screenshotWindowId, screenshotDisplayId, rootBounds);
         boolean suppressIndicator = overlay != null && !includeIndicator && !windowScopedCapture;
         if (suppressIndicator && !overlay.beginScreenshotSuppression(500L)) {
             capture.error = "indicator_suppression_timeout";
@@ -2188,7 +2279,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             if (windowScopedCapture) {
                 takeScreenshotOfWindow(screenshotWindowId, executor, callback);
             } else {
-                takeScreenshot(Display.DEFAULT_DISPLAY, executor, callback);
+                takeScreenshot(screenshotDisplayId, executor, callback);
             }
             if (!latch.await(intParam(params, "timeout", 5000), TimeUnit.MILLISECONDS)) {
                 capture.error = "timeout";
@@ -2210,10 +2301,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private void prepareCaptureCoordinates(ScreenshotCapture capture, boolean windowScoped, int windowId,
-                                           Rect rootBounds) {
+                                           int displayId, Rect rootBounds) {
         capture.captureMode = windowScoped ? "window" : "display";
         capture.windowId = windowScoped ? windowId : -1;
-        capture.displayId = Display.DEFAULT_DISPLAY;
+        capture.displayId = displayId;
         Rect displayBounds = realDisplayBounds(capture.displayId);
         capture.displayMetricsCertain = displayBounds != null;
         if (displayBounds == null) displayBounds = screenBounds();
@@ -2224,7 +2315,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             capture.boundsSource = "display";
             return;
         }
-        List<AccessibilityWindowInfo> windows = getWindows();
+        List<AccessibilityWindowInfo> windows = allWindows();
         if (windows != null) {
             for (AccessibilityWindowInfo window : windows) {
                 if (window == null || window.getId() != windowId) continue;
@@ -2243,6 +2334,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 }
                 break;
             }
+            recycleWindows(windows);
         }
         if (capture.captureBounds == null && rootBounds != null && !rootBounds.isEmpty()) {
             capture.captureBounds = new Rect(rootBounds);
@@ -2280,11 +2372,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
             capture.boundsSource = "bitmap_matches_display";
         }
         boolean valid = bounds != null && !bounds.isEmpty() && capture.imageWidth > 0 && capture.imageHeight > 0;
-        boolean supportedDisplay = capture.displayId == Display.DEFAULT_DISPLAY;
         boolean withinDisplay = valid && bounds.left >= 0 && bounds.top >= 0
                 && bounds.right <= capture.displayWidth && bounds.bottom <= capture.displayHeight;
         boolean boundsVerifiable = capture.displayMetricsCertain || "display_bitmap".equals(capture.boundsSource);
-        boolean certain = supportedDisplay && withinDisplay && boundsVerifiable
+        boolean certain = withinDisplay && boundsVerifiable
                 && (exactDisplay || "display".equals(capture.boundsSource)
                 || "display_bitmap".equals(capture.boundsSource)
                 || "accessibility_window".equals(capture.boundsSource));
@@ -2354,27 +2445,66 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private boolean dispatchTap(int x, int y) {
         if (Build.VERSION.SDK_INT < 24) return false;
+        if (isGesturePointBlocked(x, y)) return false;
         Path path = new Path();
         path.moveTo(x, y);
-        return dispatchGesture(new GestureDescription.Builder()
+        return dispatchGesture(gestureBuilderForTarget()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
                 .build(), null, null);
     }
 
     private boolean swipe(int x1, int y1, int x2, int y2, int duration) {
         if (Build.VERSION.SDK_INT < 24) return false;
+        for (int step = 0; step <= 16; step++) {
+            int x = x1 + (x2 - x1) * step / 16;
+            int y = y1 + (y2 - y1) * step / 16;
+            if (isGesturePointBlocked(x, y)) return false;
+        }
         showSwipeGesture(x1, y1, x2, y2, duration);
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
-        return dispatchGesture(new GestureDescription.Builder()
+        return dispatchGesture(gestureBuilderForTarget()
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(1, duration)))
                 .build(), null, null);
     }
 
+    private boolean isGesturePointBlocked(int x, int y) {
+        ResolvedTarget target = resolveTarget();
+        if (target == null) return true;
+        target.root.recycle();
+        List<AccessibilityWindowInfo> windows = allWindows();
+        int targetLayer = Integer.MIN_VALUE;
+        for (AccessibilityWindowInfo window : windows) {
+            if (window != null && window.getId() == target.windowId
+                    && (Build.VERSION.SDK_INT < 30 || window.getDisplayId() == target.displayId)) {
+                targetLayer = window.getLayer();
+                break;
+            }
+        }
+        if (targetLayer == Integer.MIN_VALUE) {
+            recycleWindows(windows);
+            return true;
+        }
+        boolean blocked = false;
+        for (AccessibilityWindowInfo window : windows) {
+            if (window == null || window.getId() == target.windowId || window.getLayer() <= targetLayer) continue;
+            int displayId = Build.VERSION.SDK_INT >= 30 ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
+            if (displayId != target.displayId) continue;
+            Region touchable = new Region();
+            window.getRegionInScreen(touchable);
+            if (touchable.contains(x, y)) {
+                blocked = true;
+                break;
+            }
+        }
+        recycleWindows(windows);
+        return blocked;
+    }
+
     private Match findMatch(SearchOptions options) {
         if (options.needle.isEmpty()) return null;
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return null;
         try {
             return findMatch(root, options);
@@ -2384,7 +2514,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Match findEditableMatch(SearchOptions options) {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return null;
         try {
             return findEditableMatch(root, options);
@@ -2406,7 +2536,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Match findFocusedEditable() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return null;
         try {
             return findFocusedEditable(root);
@@ -2473,7 +2603,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Rect screenBounds() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         Rect rect = new Rect(0, 0, 1080, 2400);
         if (root != null) {
             root.getBoundsInScreen(rect);
@@ -2545,7 +2675,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private String visibleTextsJson(int limit, boolean redact) {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo root = resolvedTargetRoot();
         if (root == null) return "[]";
         try {
             List<String> texts = new ArrayList<>();
@@ -2583,6 +2713,18 @@ public class HenyoAccessibilityService extends AccessibilityService {
         copy.put("text", value);
         copy.remove(key);
         return copy;
+    }
+
+    private static final class ResolvedTarget {
+        final AccessibilityNodeInfo root;
+        final int windowId;
+        final int displayId;
+
+        ResolvedTarget(AccessibilityNodeInfo root, int windowId, int displayId) {
+            this.root = root;
+            this.windowId = windowId;
+            this.displayId = displayId;
+        }
     }
 
     private static String filter(String value, boolean redact) {

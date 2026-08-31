@@ -130,6 +130,13 @@ tasks.register("verifyScreenshotCoordinateMapper", Exec) {
     commandLine "bash", "scripts/verify-screenshot-coordinate-mapper.sh"
 }
 
+tasks.register("verifyWindowTargetResolver", Exec) {
+    inputs.file("scripts/verify-window-target-resolver.sh")
+    inputs.file("src/main/java/link/liaru/henyo/WindowTargetResolver.java")
+    inputs.file("src/test/java/link/liaru/henyo/WindowTargetResolverTest.java")
+    commandLine "bash", "scripts/verify-window-target-resolver.sh"
+}
+
 tasks.register("verifyCursorMotionEasing", Exec) {
     inputs.file("scripts/verify-cursor-motion-easing.py")
     inputs.file("src/main/java/link/liaru/henyo/MotionEasing.java")
@@ -241,7 +248,7 @@ tasks.register("classesJar", Exec) {
 }
 
 tasks.register("check") {
-    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
+    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyWindowTargetResolver", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
 }
 
 tasks.register("dex", Exec) {
