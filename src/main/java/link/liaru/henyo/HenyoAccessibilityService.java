@@ -47,16 +47,20 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -99,6 +103,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final PerformanceMetrics performanceMetrics = new PerformanceMetrics();
     private final LinkedHashMap<String, CaptureCoordinateMapping> captureMappings = new LinkedHashMap<>();
     private final TargetHistoryStore targetHistoryStore = new TargetHistoryStore();
+    private final WindowRootFailureCache windowRootFailureCache = new WindowRootFailureCache();
     private final ScheduledExecutorService uiTreeExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "henyo-ui-tree");
         thread.setDaemon(true);
@@ -107,6 +112,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final ThreadPoolExecutor clientExecutor = new ThreadPoolExecutor(
             2, 16, 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), r -> {
                 Thread thread = new Thread(r, "henyo-client");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private final ThreadPoolExecutor windowRootExecutor = new ThreadPoolExecutor(
+            0, 8, 30L, TimeUnit.SECONDS, new SynchronousQueue<>(), r -> {
+                Thread thread = new Thread(r, "henyo-window-root");
                 thread.setDaemon(true);
                 return thread;
             });
@@ -145,6 +156,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             captureMappings.clear();
         }
         targetHistoryStore.clearAll();
+        windowRootFailureCache.clearAll();
         bearerTokens = new BearerTokenManager(this);
         connectionStatusOverlay = new ConnectionStatusOverlay(this, performanceMetrics);
         tailscaleWatchdog = new TailscaleWatchdog(this);
@@ -228,6 +240,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         uiTreeExecutor.shutdownNow();
         closeHttpServer();
         clientExecutor.shutdownNow();
+        windowRootExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -1857,54 +1870,66 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private TargetSnapshot resolveTarget(OperationTargetConstraint constraint, boolean remember) {
         List<AccessibilityWindowInfo> windows = allWindows();
         if (windows.isEmpty()) return null;
-        List<WindowTargetResolver.Candidate> candidates = windowCandidates(windows);
-        List<Integer> ordered = WindowTargetResolver.order(candidates, ExcludedAppStore.load(this),
-                constraint, targetHistoryStore.hints(currentTargetContextId(), SystemClock.elapsedRealtime()));
+        long now = SystemClock.elapsedRealtime();
+        List<TargetHistoryStore.WindowHint> history = targetHistoryStore.hints(
+                currentTargetContextId(), now);
+        List<WindowTargetResolver.Candidate> candidates = windowProbeCandidates(windows);
+        List<Integer> ordered = WindowProbePlanner.order(candidates, constraint, history,
+                preferredTargetWindowId, preferredTargetDisplayId);
         if (ordered.isEmpty()) {
             if (constraint == null || !constraint.specified()) clearTargetOverlay();
             recycleWindows(windows);
             return null;
         }
-        int selected = ordered.get(0);
-        AccessibilityWindowInfo window = windows.get(selected);
-        AccessibilityNodeInfo root = window.getRoot();
-        if (root == null) {
-            clearTargetOverlay();
+        Set<String> excludedPackages = ExcludedAppStore.load(this);
+        long probeStarted = SystemClock.elapsedRealtime();
+        for (int selected : ordered) {
+            long timeoutMs = WindowRootProbeBudget.nextTimeoutMs(
+                    probeStarted, SystemClock.elapsedRealtime());
+            if (timeoutMs <= 0L) break;
+            AccessibilityWindowInfo window = windows.get(selected);
+            AccessibilityNodeInfo root = windowRoot(window, timeoutMs);
+            if (root == null) continue;
+            String packageName = str(root.getPackageName());
+            if (packageName.isEmpty() || excludedPackages.contains(packageName)
+                    || (constraint != null && constraint.hasPackage()
+                    && !constraint.packageName.equals(packageName))) {
+                root.recycle();
+                continue;
+            }
+            TargetSnapshot target = targetSnapshot(windows, selected, root, packageName);
+            if (remember) acceptResolvedTarget(target);
             recycleWindows(windows);
-            return null;
+            return target;
         }
-        TargetSnapshot target = targetSnapshot(windows, candidates, selected, root);
-        if (remember) acceptResolvedTarget(target);
+        clearTargetOverlay();
         recycleWindows(windows);
-        return target;
+        return null;
     }
 
-    private List<WindowTargetResolver.Candidate> windowCandidates(List<AccessibilityWindowInfo> windows) {
+    private List<WindowTargetResolver.Candidate> windowProbeCandidates(
+            List<AccessibilityWindowInfo> windows) {
         List<WindowTargetResolver.Candidate> candidates = new ArrayList<>();
         for (AccessibilityWindowInfo window : windows) {
-            AccessibilityNodeInfo root = window == null ? null : window.getRoot();
-            String packageName = root == null ? "" : str(root.getPackageName());
             Rect bounds = new Rect();
             if (window != null) window.getBoundsInScreen(bounds);
             candidates.add(new WindowTargetResolver.Candidate(
                     window == null ? -1 : window.getId(),
                     window == null || Build.VERSION.SDK_INT < 30
                             ? Display.DEFAULT_DISPLAY : window.getDisplayId(),
-                    window == null ? Integer.MIN_VALUE : window.getLayer(), packageName,
+                    window == null ? Integer.MIN_VALUE : window.getLayer(), "",
                     window != null && window.getType() == AccessibilityWindowInfo.TYPE_APPLICATION,
-                    root != null, window != null && window.isActive(),
+                    false, window != null && window.isActive(),
                     window != null && window.isFocused(), bounds.left, bounds.top,
                     bounds.right, bounds.bottom));
-            if (root != null) root.recycle();
         }
         return candidates;
     }
 
     private TargetSnapshot targetSnapshot(List<AccessibilityWindowInfo> windows,
-                                          List<WindowTargetResolver.Candidate> candidates,
-                                          int selected, AccessibilityNodeInfo root) {
+                                          int selected, AccessibilityNodeInfo root,
+                                          String packageName) {
         AccessibilityWindowInfo window = windows.get(selected);
-        WindowTargetResolver.Candidate selectedCandidate = candidates.get(selected);
         int windowId = window.getId();
         int displayId = Build.VERSION.SDK_INT >= 30 ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
         Rect bounds = new Rect();
@@ -1921,8 +1946,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
             // Keep the target contour visually continuous across the system split divider.
             // Gesture hit testing still treats this window as blocked in isGesturePointBlocked().
             if (blocker.getType() == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER) continue;
-            WindowTargetResolver.Candidate blockerCandidate = candidates.get(i);
-            if (getPackageName().equals(blockerCandidate.packageName)) continue;
+            if (blocker.getType() == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+                    && getPackageName().equals(windowPackageName(blocker))) continue;
             Region blockerRegion = new Region();
             blocker.getRegionInScreen(blockerRegion);
             actionableRegion.op(blockerRegion, Region.Op.DIFFERENCE);
@@ -1933,8 +1958,75 @@ public class HenyoAccessibilityService extends AccessibilityService {
                     blocker.getType() == AccessibilityWindowInfo.TYPE_SYSTEM);
             if (!retainedChrome) presentationRegion.op(blockerRegion, Region.Op.DIFFERENCE);
         }
-        return new TargetSnapshot(root, selectedCandidate.packageName, windowId, displayId,
+        return new TargetSnapshot(root, packageName, windowId, displayId,
                 bounds, actionableRegion, presentationRegion);
+    }
+
+    private String windowPackageName(AccessibilityWindowInfo window) {
+        AccessibilityNodeInfo root = windowRoot(window);
+        if (root == null) return "";
+        try {
+            return str(root.getPackageName());
+        } finally {
+            root.recycle();
+        }
+    }
+
+    private AccessibilityNodeInfo windowRoot(AccessibilityWindowInfo window) {
+        return windowRoot(window, WindowRootProbeBudget.PER_WINDOW_TIMEOUT_MS);
+    }
+
+    private AccessibilityNodeInfo windowRoot(AccessibilityWindowInfo window, long timeoutMs) {
+        if (window == null) return null;
+        int displayId = Build.VERSION.SDK_INT >= 30
+                ? window.getDisplayId() : Display.DEFAULT_DISPLAY;
+        Rect bounds = new Rect();
+        window.getBoundsInScreen(bounds);
+        long now = SystemClock.elapsedRealtime();
+        if (windowRootFailureCache.shouldSkip(window.getId(), displayId, window.getLayer(),
+                bounds.left, bounds.top, bounds.right, bounds.bottom, now)) return null;
+
+        AccessibilityWindowInfo ownedWindow = AccessibilityWindowInfo.obtain(window);
+        PendingRootLookup pending = new PendingRootLookup();
+        Future<?> future;
+        try {
+            future = windowRootExecutor.submit(() -> {
+                AccessibilityNodeInfo root = null;
+                try {
+                    root = ownedWindow.getRoot();
+                    pending.complete(root);
+                    root = null;
+                } finally {
+                    if (root != null) root.recycle();
+                    ownedWindow.recycle();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            ownedWindow.recycle();
+            return null;
+        }
+        try {
+            future.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+            AccessibilityNodeInfo root = pending.claim();
+            if (root == null) {
+                windowRootFailureCache.record(window.getId(), displayId, window.getLayer(),
+                        bounds.left, bounds.top, bounds.right, bounds.bottom, now);
+            } else {
+                windowRootFailureCache.clear(window.getId(), displayId);
+            }
+            return root;
+        } catch (TimeoutException | ExecutionException e) {
+            pending.abandon();
+            future.cancel(true);
+            windowRootFailureCache.record(window.getId(), displayId, window.getLayer(),
+                    bounds.left, bounds.top, bounds.right, bounds.bottom, now);
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            pending.abandon();
+            future.cancel(true);
+            return null;
+        }
     }
 
     private void acceptResolvedTarget(TargetSnapshot target) {
@@ -2758,7 +2850,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         for (AccessibilityWindowInfo window : windows) {
             if (window != null && window.getId() == target.windowId
                     && (Build.VERSION.SDK_INT < 30 || window.getDisplayId() == target.displayId)) {
-                AccessibilityNodeInfo root = window.getRoot();
+                AccessibilityNodeInfo root = windowRoot(window);
                 String packageName = root == null ? "" : str(root.getPackageName());
                 if (root != null) root.recycle();
                 if (!target.packageName.equals(packageName)) {
@@ -2848,15 +2940,30 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private Match findAcrossWindows(SearchOptions options, OperationTargetConstraint constraint, int mode) {
         List<AccessibilityWindowInfo> windows = allWindows();
         if (windows.isEmpty()) return null;
-        List<WindowTargetResolver.Candidate> candidates = windowCandidates(windows);
-        List<Integer> ordered = WindowTargetResolver.order(candidates, ExcludedAppStore.load(this),
-                constraint, targetHistoryStore.hints(currentTargetContextId(), SystemClock.elapsedRealtime()));
+        long now = SystemClock.elapsedRealtime();
+        List<TargetHistoryStore.WindowHint> history = targetHistoryStore.hints(
+                currentTargetContextId(), now);
+        List<WindowTargetResolver.Candidate> candidates = windowProbeCandidates(windows);
+        List<Integer> ordered = WindowProbePlanner.order(candidates, constraint, history,
+                preferredTargetWindowId, preferredTargetDisplayId);
+        Set<String> excludedPackages = ExcludedAppStore.load(this);
         Match result = null;
+        long probeStarted = SystemClock.elapsedRealtime();
         for (int selected : ordered) {
+            long timeoutMs = WindowRootProbeBudget.nextTimeoutMs(
+                    probeStarted, SystemClock.elapsedRealtime());
+            if (timeoutMs <= 0L) break;
             AccessibilityWindowInfo window = windows.get(selected);
-            AccessibilityNodeInfo root = window == null ? null : window.getRoot();
+            AccessibilityNodeInfo root = windowRoot(window, timeoutMs);
             if (root == null) continue;
-            TargetSnapshot snapshot = targetSnapshot(windows, candidates, selected, root);
+            String packageName = str(root.getPackageName());
+            if (packageName.isEmpty() || excludedPackages.contains(packageName)
+                    || (constraint != null && constraint.hasPackage()
+                    && !constraint.packageName.equals(packageName))) {
+                root.recycle();
+                continue;
+            }
+            TargetSnapshot snapshot = targetSnapshot(windows, selected, root, packageName);
             TargetRef target = snapshot.ref();
             if (mode == MATCH_EDITABLE) result = findEditableMatch(root, options, target);
             else if (mode == MATCH_FOCUSED_EDITABLE) result = findFocusedEditable(root, target);
@@ -3016,6 +3123,33 @@ public class HenyoAccessibilityService extends AccessibilityService {
         copy.put("text", value);
         copy.remove(key);
         return copy;
+    }
+
+    private static final class PendingRootLookup {
+        private AccessibilityNodeInfo root;
+        private boolean abandoned;
+
+        synchronized void complete(AccessibilityNodeInfo value) {
+            if (abandoned) {
+                if (value != null) value.recycle();
+                return;
+            }
+            root = value;
+        }
+
+        synchronized AccessibilityNodeInfo claim() {
+            AccessibilityNodeInfo value = root;
+            root = null;
+            return value;
+        }
+
+        synchronized void abandon() {
+            abandoned = true;
+            if (root != null) {
+                root.recycle();
+                root = null;
+            }
+        }
     }
 
     private static final class TargetSnapshot {
