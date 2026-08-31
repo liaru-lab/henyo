@@ -136,6 +136,15 @@ Android remains compatible and returns:
 {"ok":true,"protocolVersion":1,"serviceEpoch":"opaque"}
 ```
 
+Current window-aware Android returns the installed APK version and capabilities:
+
+```json
+{"ok":true,"application":{"id":"link.liaru.henyo","versionName":"0.4.0","versionCode":14},"protocolVersion":1,"contractRevision":"remote-control.core/1.0.0","serviceEpoch":"opaque","platform":{"name":"android","version":"16"},"capabilities":{"profile":"remote-control.core/1","features":["windowTargeting","explicitCaptureMode","displayTargeting","displayCapture","screenshotCoordinates","windowCapture"],"limits":{},"operations":{}}}
+```
+
+The CLI exposes this checkpoint as `bin/henyo version`. APK fields are for
+diagnostics; capability names are the authoritative feature negotiation input.
+
 An additive iPhone gateway returns:
 
 ```json
@@ -204,6 +213,15 @@ bypasses the cache. `maxAgeMs` may require a stricter age but cannot relax the
 `ui.dirty`, a changed `serviceEpoch`, a new action generation, or an unstable
 capture range. Cached responses include `cached:true` and `cacheAgeMs`; direct
 requests use `cached:false` where applicable.
+
+A cached `ui.tree` is reused only when its resolved target satisfies every
+target field requested by the caller. An untargeted cache entry cannot satisfy
+a targeted request, and a tree from another package/window/display is never
+returned as a shortcut. Before forwarding a request containing window target
+fields or an explicit screenshot `captureMode`, the helper requires the
+corresponding `windowTargeting` or `explicitCaptureMode` feature. A legacy
+server therefore fails closed with `capability_required` instead of silently
+dropping target intent.
 
 The `observe` helper command forwards params to the WS `ui.observe` operation:
 

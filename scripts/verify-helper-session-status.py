@@ -27,6 +27,7 @@ class FakeWs:
         self.generation = 7
         self.sock = object() if available else None
         self.last_error = "private endpoint detail"
+        self.calls = []
 
     def ensure_connected(self):
         self.ensure_calls += 1
@@ -47,6 +48,10 @@ class FakeWs:
         self.daemon.handle_disconnect(reason)
         return True
 
+    def call(self, op, params, *args, **kwargs):
+        self.calls.append((op, params, args, kwargs))
+        return {"type": "result", "ok": True, "result": {"ok": True}}
+
 
 def fixture(name):
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
@@ -65,6 +70,55 @@ def main():
     assert android.dispatch({"cmd": "session.status"}) == {
         "ok": True, "protocolVersion": 1, "serviceEpoch": "android-epoch",
     }
+    assert android.dispatch({
+        "cmd": "call", "op": "ui.tree", "params": {"package": "com.example.app"},
+    }) == {"ok": False, "error": "capability_required", "capability": "windowTargeting"}
+
+    android_event = fixture("legacy-android.json")
+    android_event.update({
+        "application": {
+            "id": "com.example.henyo", "versionName": "1.2.3", "versionCode": 42,
+        },
+        "contractRevision": helper.SUPPORTED_CONTRACT_REVISION,
+        "platform": {"name": "android", "version": "16"},
+        "capabilities": {
+            "profile": helper.SUPPORTED_CAPABILITY_PROFILE,
+            "features": ["windowTargeting", "explicitCaptureMode", "windowCapture"],
+            "limits": {},
+            "operations": {},
+        },
+    })
+    additive_android = daemon_with(android_event)
+    additive_result = additive_android.dispatch({"cmd": "session.status"})
+    assert additive_result["application"] == android_event["application"]
+    assert additive_result["capabilities"]["features"] == [
+        "windowTargeting", "explicitCaptureMode", "windowCapture",
+    ]
+    allowed = additive_android.dispatch({
+        "cmd": "call", "op": "ui.tree", "params": {"package": "com.example.app"},
+    })
+    assert allowed["ok"] is True and additive_android.ws.calls[-1][0] == "ui.tree"
+    capture_allowed = additive_android.dispatch({
+        "cmd": "call", "op": "screen.screenshot", "params": {"captureMode": "window"},
+    })
+    assert capture_allowed["ok"] is True
+
+    bad_application = dict(android_event)
+    bad_application["application"] = dict(android_event["application"])
+    bad_application["application"]["versionCode"] = "42"
+    assert daemon_with(bad_application).dispatch({"cmd": "session.status"}) == {
+        "ok": False, "error": "session_metadata_invalid",
+    }
+
+    cached_tree = {
+        "target": {"package": "com.example.first", "windowId": 7, "displayId": 2},
+    }
+    assert helper.HelperDaemon.tree_target_matches(
+        {"package": "com.example.first", "displayId": 2}, cached_tree,
+    )
+    assert not helper.HelperDaemon.tree_target_matches(
+        {"package": "com.example.second"}, cached_tree,
+    )
 
     ios = daemon_with(fixture("ios-additive.json"))
     result = ios.dispatch({"cmd": "session.status"})

@@ -130,6 +130,29 @@ tasks.register("verifyScreenshotCoordinateMapper", Exec) {
     commandLine "bash", "scripts/verify-screenshot-coordinate-mapper.sh"
 }
 
+tasks.register("verifyWindowTargetResolver", Exec) {
+    inputs.file("scripts/verify-window-target-resolver.sh")
+    inputs.file("src/main/java/link/liaru/henyo/WindowTargetResolver.java")
+    inputs.file("src/main/java/link/liaru/henyo/OperationTargetConstraint.java")
+    inputs.file("src/main/java/link/liaru/henyo/TargetHistoryStore.java")
+    inputs.file("src/test/java/link/liaru/henyo/WindowTargetResolverTest.java")
+    inputs.file("src/test/java/link/liaru/henyo/TargetHistoryStoreTest.java")
+    inputs.file("src/main/java/link/liaru/henyo/TargetGlowModel.java")
+    inputs.file("src/test/java/link/liaru/henyo/TargetGlowModelTest.java")
+    inputs.file("src/main/java/link/liaru/henyo/ScreenshotCaptureMode.java")
+    inputs.file("src/test/java/link/liaru/henyo/ScreenshotCaptureModeTest.java")
+    inputs.file("src/main/java/link/liaru/henyo/TargetPresentationPolicy.java")
+    inputs.file("src/test/java/link/liaru/henyo/TargetPresentationPolicyTest.java")
+    commandLine "bash", "scripts/verify-window-target-resolver.sh"
+}
+
+tasks.register("verifyWindowClientContract", Exec) {
+    inputs.file("scripts/verify-window-client-contract.py")
+    inputs.file("python/henyo/cli.py")
+    inputs.file("python/henyo/helper.py")
+    commandLine "python", "scripts/verify-window-client-contract.py"
+}
+
 tasks.register("verifyCursorMotionEasing", Exec) {
     inputs.file("scripts/verify-cursor-motion-easing.py")
     inputs.file("src/main/java/link/liaru/henyo/MotionEasing.java")
@@ -241,7 +264,7 @@ tasks.register("classesJar", Exec) {
 }
 
 tasks.register("check") {
-    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
+    dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyWindowTargetResolver", "verifyWindowClientContract", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
 }
 
 tasks.register("dex", Exec) {

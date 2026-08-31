@@ -48,6 +48,12 @@ KNOWN_CAPABILITY_FEATURES = frozenset({
     "expectedServiceEpoch",
     "mutationOutcome",
     "internalControlOwner",
+    "windowTargeting",
+    "explicitCaptureMode",
+    "displayTargeting",
+    "displayCapture",
+    "screenshotCoordinates",
+    "windowCapture",
 })
 KNOWN_CAPABILITY_LIMITS = frozenset({
     "inboundFrameBytes",
@@ -97,6 +103,7 @@ TARGET_BOUND_COMMANDS = frozenset({
     "session.status", "tree", "current", "observe", "progress.set",
     "progress.finish", "completion.show", "call", "batch", "auth.reload",
 })
+WINDOW_TARGET_FIELDS = frozenset({"package", "windowId", "displayId"})
 
 
 def unicode_code_point_count(value: str) -> int:
@@ -221,6 +228,23 @@ def sanitize_session_ready(event: Dict[str, Any]) -> Dict[str, Any]:
         "protocolVersion": version,
         "serviceEpoch": epoch,
     }
+    application = event.get("application")
+    if application is not None:
+        if not isinstance(application, dict):
+            raise SessionMetadataError("session_metadata_invalid")
+        app_id = application.get("id")
+        version_name = application.get("versionName")
+        version_code = application.get("versionCode")
+        if (not bounded_scalar_string(app_id, 256)
+                or not bounded_scalar_string(version_name, 128)
+                or not isinstance(version_code, int) or isinstance(version_code, bool)
+                or not 0 <= version_code <= 2_100_000_000):
+            raise SessionMetadataError("session_metadata_invalid")
+        sanitized["application"] = {
+            "id": app_id,
+            "versionName": version_name,
+            "versionCode": version_code,
+        }
     additive_names = ("contractRevision", "platform", "capabilities")
     present = tuple(name in event for name in additive_names)
     if not any(present):
@@ -1174,6 +1198,68 @@ class HelperDaemon:
             response["tree" if kind == "tree" else "result"] = value
             return response
 
+    @staticmethod
+    def tree_target_matches(params: Dict[str, Any], tree: Any) -> bool:
+        if not isinstance(tree, dict):
+            return False
+        target = tree.get("target")
+        if not isinstance(target, dict):
+            payload = tree.get("payload")
+            target = payload.get("target") if isinstance(payload, dict) else None
+        if not isinstance(target, dict):
+            return not any(name in params for name in WINDOW_TARGET_FIELDS)
+        for name in WINDOW_TARGET_FIELDS:
+            if name in params and params[name] != target.get(name):
+                return False
+        return True
+
+    def cached_tree_response(self, params: Dict[str, Any], max_age_ms: int) -> Optional[Dict[str, Any]]:
+        cached = self.cached_response("tree", max_age_ms)
+        if cached is None or not self.tree_target_matches(params, cached.get("tree")):
+            return None
+        return cached
+
+    @staticmethod
+    def request_features(request: Dict[str, Any]) -> set[str]:
+        required: set[str] = set()
+
+        def inspect_params(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            selector = value.get("selector")
+            if isinstance(selector, dict):
+                inspect_params(selector)
+            if any(name in value for name in WINDOW_TARGET_FIELDS):
+                required.add("windowTargeting")
+            if "captureMode" in value:
+                required.add("explicitCaptureMode")
+
+        cmd = request.get("cmd")
+        if cmd in ("tree", "observe", "call"):
+            inspect_params(request.get("params"))
+        elif cmd == "batch":
+            steps = request.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    if isinstance(step, dict):
+                        inspect_params(step.get("params"))
+        return required
+
+    def require_request_features(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        required = self.request_features(request)
+        if not required:
+            return None
+        status = self.session_status()
+        if not status.get("ok"):
+            return status
+        capabilities = status.get("capabilities")
+        features = capabilities.get("features") if isinstance(capabilities, dict) else []
+        available = set(features) if isinstance(features, list) else set()
+        for feature in sorted(required):
+            if feature not in available:
+                return {"ok": False, "error": "capability_required", "capability": feature}
+        return None
+
     def mark_action_pending(self, expected_package: str = "") -> str:
         with self.cache_lock:
             generation = int(self.cache.get("actionGeneration", 0) or 0) + 1
@@ -1343,6 +1429,9 @@ class HelperDaemon:
             mismatch = self.target_mismatch(request)
             if mismatch is not None:
                 return mismatch
+        missing_capability = self.require_request_features(request)
+        if missing_capability is not None:
+            return missing_capability
         cmd = request.get("cmd")
         if cmd == "session.status":
             return self.session_status()
@@ -1397,14 +1486,15 @@ class HelperDaemon:
         if cmd == "tree":
             fresh = bool(request.get("fresh"))
             max_age_ms = self.requested_max_age_ms(request)
-            cached = None if fresh else self.cached_response("tree", max_age_ms)
+            params = request.get("params") if isinstance(request.get("params"), dict) else {}
+            cached = None if fresh else self.cached_tree_response(params, max_age_ms)
             if cached is not None:
                 return cached
             display = request.get("display") if isinstance(request.get("display"), dict) else None
             if display is None:
-                result = self.ws.call("ui.tree", request.get("params") or {})
+                result = self.ws.call("ui.tree", params)
             else:
-                result = self.ws.call("ui.tree", request.get("params") or {}, display=display)
+                result = self.ws.call("ui.tree", params, display=display)
             with self.cache_lock:
                 tree = self.cache.get("tree")
             return {"ok": result.get("ok", False), "cached": False, "result": result, "tree": tree}

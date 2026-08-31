@@ -210,11 +210,17 @@ hard stop and ask the user to review the named client on the Android device.
 
 ## Core Workflow
 
-1. Check service health:
+1. Negotiate the installed APK, protocol, and capabilities, then check health:
 
 ```sh
+bin/henyo version
 bin/henyo health
 ```
+
+Treat `capabilities.features` as authoritative. Do not infer support from the
+APK version. A `capability_required` response is a hard stop for that optional
+behavior; do not retry after removing target or capture fields because that may
+operate on a different window.
 
 2. If UI root is unavailable, recover the accessibility service:
 
@@ -275,6 +281,32 @@ bin/henyo tap 540 300 --coordinate-space screenshot --capture-id CAPTURE_ID \
 bin/henyo swipe 540 1800 540 900 300 --coordinate-space screenshot \
   --capture-id CAPTURE_ID --intent "スクリーンショット上の範囲をスクロールします"
 ```
+
+When several application windows are present, add `--package PACKAGE` to
+`find`, `click`, `observe`, `screenshot`, `tap`, or `swipe`. Add
+`--window-id ID` and `--display-id ID` when one package owns more than one
+candidate window. UI-node operations can re-resolve a recreated window inside
+the same package; screenshot-derived coordinates cannot and require a fresh
+capture when the window identity or geometry changes.
+
+Propagate the resolved `target` tuple from an observation or successful
+operation to each following operation. This is operation-scoped state, not one
+session-wide active window. After launching or switching apps, re-observe. If a
+window id becomes stale, retry discovery by package only, then adopt the newly
+resolved window id; never transfer a stale id to another package.
+
+Choose capture scope deliberately:
+
+```sh
+bin/henyo screenshot --json --capture-mode window --package PACKAGE --window-id WINDOW_ID
+bin/henyo screenshot --json --capture-mode display --display-id DISPLAY_ID
+```
+
+Use `window` for grounding and interaction inside one app window. Use `display`
+when the task requires the fully composited screen, including overlap between
+windows. `auto` is compatibility behavior, not an assertion of either scope.
+Do not silently substitute display capture after
+`unsupported_window_capture`.
 
 Never reuse a capture id with another screenshot. Mappings live only in the
 current accessibility-service epoch and expire after 120 seconds. Capture a

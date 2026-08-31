@@ -219,10 +219,12 @@ docs/ws-control-protocol.md
 ```
 
 While at least one authenticated WebSocket control session is connected, Henyo
-draws a restrained dark-navy and cyan inward glow from the top edge using the
-app icon's palette. A control call or batch expands it into a translucent
-whole-display inner glow with soft cyan corner pulses. Recent activity holds
-for 20 seconds and then fades over 1.8 seconds, bridging slower agent pauses
+draws a restrained dark-navy and cyan indicator using the app icon's palette.
+A control call or batch expands it into a translucent inward glow around the
+resolved target window on that window's display. The contour follows the safe
+presentation bounds, clips around occluding overlays, and moves beside task
+chrome when an edge cannot be drawn over directly. Recent activity holds for
+20 seconds and then fades over 1.8 seconds, bridging slower agent pauses
 instead of repeatedly collapsing. The first activation and any fade reversal
 ease into one uptime-based pulse; a new call extends the lease without resetting
 the pulse phase. The lower navy shade shares that lease, so it is already present
@@ -249,9 +251,11 @@ double-stacks a stale plan. Completion text is ephemeral and is not echoed,
 logged, persisted, cached, included in diagnostics, or replayed.
 
 Tree, find, wait, screenshot, and combined observation calls add one restrained
-cyan scan from the top of the display toward the bottom. Internal observation
-retries and post-action settling do not restart it. Manipulative actions share
-one persistent 58dp Henyo glove cursor. Its first session position is the screen
+cyan-to-blue-to-violet scan from the top of the display toward the bottom. A
+thin bright core is surrounded by a smooth vertical fade instead of a stacked
+line shadow. Internal observation retries and post-action settling do not
+restart it. Manipulative actions share one persistent 58dp Henyo glove cursor.
+Its first session position is the screen
 centre; later actions travel from the retained wrist position to their real
 target over a distance-based 180–450ms ease before the operation executes.
 Every move uses the pointing pose. At the action start it switches to the one
@@ -349,6 +353,7 @@ launcher; on Windows PowerShell, replace `bin/henyo` with `.\bin\henyo.ps1`.
 bin/henyo helper start
 bin/henyo helper status
 bin/henyo helper reload-auth
+bin/henyo version
 bin/henyo cache tree
 bin/henyo cache clear
 bin/henyo batch batch.json
@@ -365,6 +370,7 @@ bin/henyo apps
 bin/henyo apps --all
 bin/henyo find Battery --exact
 bin/henyo click Battery --exact
+bin/henyo click Search --package com.example.maps --window-id 17 --display-id 0
 bin/henyo click Battery --exact --intent 'Battery設定を開きます'
 bin/henyo wait Battery --exact --timeout 5000
 bin/henyo launch com.android.settings
@@ -373,6 +379,18 @@ bin/henyo current
 bin/henyo back
 bin/henyo home
 ```
+
+Run `bin/henyo version` before using optional behavior. It reports the installed
+APK `versionName`/`versionCode`, protocol revision, Android platform, and
+advertised capabilities through the persistent helper. Gate behavior on
+capabilities, not APK version comparisons.
+
+Window-aware commands accept `--package`, `--window-id`, and `--display-id`.
+Use the resolved target returned by observation or a successful operation for
+the next call. Package is the stable recovery identity when Android recreates a
+window id. Screenshots additionally accept `--capture-mode window|display|auto`:
+window is the target client region with coordinate metadata, display is the
+fully composited user-visible screen, and auto preserves legacy behavior.
 
 The helper returns cached `tree` and `current` data for at most 1000 ms by
 default. Use `--fresh` (or `HENYO_FRESH=1`) to bypass that cache, and use
