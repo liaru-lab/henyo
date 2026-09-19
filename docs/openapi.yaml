@@ -106,6 +106,34 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/ForbiddenBySource"
+  /v1/adb/wireless-endpoint:
+    get:
+      tags: [authenticated-control]
+      operationId: adbWirelessEndpoint
+      description: |
+        Returns the current Wireless debugging connection port and, when the
+        Android pairing server is active, its pairing port. This endpoint never
+        returns a pairing code or ADB key material. Remote callers require a
+        Bearer token with the `adb-wireless-endpoint` capability.
+      security:
+        - bearerAuth: []
+      x-henyo-endpoint-class: authenticated-control
+      x-henyo-capability: adb-wireless-endpoint
+      x-henyo-access:
+        localhost: allowed
+        allowedRemoteCidrs: requires Bearer auth and capability
+        otherAddresses: denied
+      responses:
+        "200":
+          description: Current discovery state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdbWirelessEndpointResponse"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "403":
+          $ref: "#/components/responses/ForbiddenBySource"
   /v1/remote/pairing:
     get:
       tags: [remote-pairing]
@@ -837,6 +865,7 @@ components:
         - pairing_rate_limited
         - not_found
         - conflict
+        - adb_wireless_endpoint_permission_required
     ErrorResponse:
       type: object
       required: [ok, error, code]
@@ -871,6 +900,30 @@ components:
           type: boolean
         error:
           type: string
+    AdbWirelessEndpointResponse:
+      type: object
+      required: [ok, available, connectPort, pairingPort, pairingMode]
+      properties:
+        ok:
+          type: boolean
+        available:
+          type: boolean
+          description: True when a local Wireless debugging connect service was resolved.
+        connectPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: ADB TLS connection port, or zero when unavailable.
+        pairingPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: Pairing server port, or zero when pairing mode is inactive.
+        pairingMode:
+          type: boolean
+        reason:
+          type: string
+          description: Structured unavailable or discovery error reason.
     HealthResponse:
       type: object
       required: [ok, service, lastEventTime]
@@ -1076,7 +1129,7 @@ components:
           type: array
           items:
             type: string
-            enum: [control, token-management, termux-command, sensitive-ui-control]
+            enum: [control, token-management, termux-command, sensitive-ui-control, adb-wireless-endpoint]
         createdAt:
           type: string
           format: date-time

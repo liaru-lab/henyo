@@ -123,6 +123,18 @@ tasks.register("verifyConnectivityWatchdog", Exec) {
     commandLine "python", "scripts/verify-connectivity-watchdog.py"
 }
 
+tasks.register("verifyAdbWirelessEndpoint", Exec) {
+    inputs.file("scripts/verify-adb-wireless-endpoint.py")
+    inputs.file("src/main/AndroidManifest.xml")
+    inputs.file("src/main/java/link/liaru/henyo/AdbWirelessDiscovery.java")
+    inputs.file("src/main/java/link/liaru/henyo/BearerAuthPolicy.java")
+    inputs.file("src/main/java/link/liaru/henyo/BearerTokenManager.java")
+    inputs.file("src/main/java/link/liaru/henyo/HenyoAccessibilityService.java")
+    inputs.file("src/main/java/link/liaru/henyo/MainActivity.java")
+    inputs.file("docs/openapi.yaml")
+    commandLine "python", "scripts/verify-adb-wireless-endpoint.py"
+}
+
 tasks.register("verifyScreenshotCoordinateMapper", Exec) {
     inputs.file("scripts/verify-screenshot-coordinate-mapper.sh")
     inputs.file("src/main/java/link/liaru/henyo/ScreenshotCoordinateMapper.java")

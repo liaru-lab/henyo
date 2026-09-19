@@ -102,6 +102,11 @@ public class MainActivity extends Activity {
         saveRemoteAccess.setOnClickListener((View v) -> saveRemoteAccess());
         root.addView(saveRemoteAccess);
 
+        Button openDeveloperOptions = new Button(this);
+        openDeveloperOptions.setText("Open Android Developer Options");
+        openDeveloperOptions.setOnClickListener((View v) -> openDeveloperOptions());
+        root.addView(openDeveloperOptions);
+
         root.addView(sectionTitle("Connectivity Watchdog"));
         tailscaleWatchdogEnabled = new Switch(this);
         tailscaleWatchdogEnabled.setText("Auto-recover Tailscale VPN");
@@ -356,6 +361,20 @@ public class MainActivity extends Activity {
                 });
                 row.addView(sensitiveUiControl);
 
+                Switch adbWirelessEndpoint = new Switch(this);
+                adbWirelessEndpoint.setText("Allow wireless ADB endpoint discovery");
+                adbWirelessEndpoint.setChecked(record.hasScope(BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT));
+                adbWirelessEndpoint.setOnCheckedChangeListener((button, enabled) -> {
+                    BearerTokenManager manager = new BearerTokenManager(this);
+                    if (!manager.setScope(record.id, BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT, enabled)) {
+                        showMessage("Could not update wireless ADB permission for " + record.name);
+                    } else {
+                        showMessage((enabled ? "Enabled" : "Disabled") + " wireless ADB discovery for " + record.name);
+                    }
+                    updateStatus();
+                });
+                row.addView(adbWirelessEndpoint);
+
                 Button revoke = new Button(this);
                 revoke.setText("Revoke " + record.name);
                 revoke.setOnClickListener((View v) -> {
@@ -369,6 +388,14 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void openDeveloperOptions() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+        } catch (RuntimeException error) {
+            startActivity(new Intent(Settings.ACTION_SETTINGS));
+        }
+    }
+
     private String tokenSummary(BearerTokenManager.TokenRecord record) {
         StringBuilder sb = new StringBuilder();
         sb.append(record.name).append(record.revoked ? " (revoked)" : " (active)");
@@ -377,6 +404,8 @@ public class MainActivity extends Activity {
                 .append(record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND) ? "allowed" : "not allowed");
         sb.append("\nProtected Android controls: ")
                 .append(record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL) ? "allowed" : "not allowed");
+        sb.append("\nWireless ADB endpoint: ")
+                .append(record.hasScope(BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT) ? "allowed" : "not allowed");
         sb.append("\nCreated: ").append(BearerTokenManager.instant(record.createdAt));
         if (record.lastUsedAt > 0) sb.append("\nLast used: ").append(BearerTokenManager.instant(record.lastUsedAt));
         if (!record.lastSourceAddress.isEmpty()) sb.append("\nLast source: ").append(record.lastSourceAddress);
