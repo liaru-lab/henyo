@@ -21,6 +21,7 @@ final class BearerTokenManager {
     static final String SCOPE_TOKEN_MANAGEMENT = "token-management";
     static final String SCOPE_TERMUX_COMMAND = "termux-command";
     static final String SCOPE_SENSITIVE_UI_CONTROL = "sensitive-ui-control";
+    static final String SCOPE_ADB_WIRELESS_ENDPOINT = "adb-wireless-endpoint";
     private static final String PREFS = "bearer_tokens";
     private static final String KEY_RECORDS = "records";
     private static final String HASH_PREFIX = "sha256:";
@@ -240,7 +241,8 @@ final class BearerTokenManager {
         return SCOPE_CONTROL.equals(scope)
                 || SCOPE_TOKEN_MANAGEMENT.equals(scope)
                 || SCOPE_TERMUX_COMMAND.equals(scope)
-                || SCOPE_SENSITIVE_UI_CONTROL.equals(scope);
+                || SCOPE_SENSITIVE_UI_CONTROL.equals(scope)
+                || SCOPE_ADB_WIRELESS_ENDPOINT.equals(scope);
     }
 
     static String instant(long millis) {

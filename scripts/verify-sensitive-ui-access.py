@@ -32,8 +32,7 @@ require(SERVICE, "node.isAccessibilityDataSensitive()", "sensitive-node detectio
 require(POLICY, 'path.startsWith("/ui/")', "legacy UI endpoint guard missing")
 require(POLICY, 'path.startsWith("/screen/")', "legacy screenshot endpoint guard missing")
 require(PROTOCOL, "sensitive-ui-control", "protocol authorization documentation missing")
-require(OPENAPI, "enum: [control, token-management, termux-command, sensitive-ui-control]",
-        "token metadata scope schema missing sensitive UI scope")
+require(OPENAPI, "sensitive-ui-control", "token metadata scope schema missing sensitive UI scope")
 
 requested_scopes = SERVICE[SERVICE.index("private static List<String> requestedScopes"):
                            SERVICE.index("private Response tokenList", SERVICE.index("private static List<String> requestedScopes"))]

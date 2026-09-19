@@ -4,7 +4,10 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Typeface;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,6 +15,7 @@ import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -30,6 +34,12 @@ import java.util.List;
 import java.util.Set;
 
 public class MainActivity extends Activity {
+    private static final int COLOR_BACKGROUND = Color.rgb(245, 247, 251);
+    private static final int COLOR_TEXT = Color.rgb(32, 34, 40);
+    private static final int COLOR_MUTED = Color.rgb(92, 96, 105);
+    private static final int COLOR_ACCENT = Color.rgb(55, 83, 160);
+    private static final int COLOR_DANGER = Color.rgb(180, 45, 55);
+    private static final int COLOR_DANGER_BACKGROUND = Color.rgb(255, 235, 237);
     private static final int ID_BIND_LOCALHOST = 1001;
     private static final int ID_BIND_ALL_INTERFACES = 1002;
     private static final int REQUEST_TERMUX_RUN_COMMAND = 2001;
@@ -59,11 +69,16 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(COLOR_BACKGROUND);
         int pad = dp(20);
         root.setPadding(pad, pad, pad, pad);
         scroll.addView(root);
 
         root.addView(sectionTitle("Henyo Accessibility Bridge"));
+        TextView intro = bodyText();
+        intro.setText("A local-first control bridge for secure device automation.");
+        intro.setTextColor(COLOR_MUTED);
+        root.addView(intro);
         status = bodyText();
         root.addView(status);
 
@@ -76,6 +91,7 @@ public class MainActivity extends Activity {
         Button chooseExcludedApps = new Button(this);
         chooseExcludedApps.setText("Choose Excluded Apps");
         chooseExcludedApps.setOnClickListener((View v) -> showExcludedAppPicker());
+        styleSecondaryButton(chooseExcludedApps);
         root.addView(chooseExcludedApps);
 
         root.addView(sectionTitle("Remote Access"));
@@ -100,7 +116,14 @@ public class MainActivity extends Activity {
         Button saveRemoteAccess = new Button(this);
         saveRemoteAccess.setText("Save Remote Access");
         saveRemoteAccess.setOnClickListener((View v) -> saveRemoteAccess());
+        stylePrimaryButton(saveRemoteAccess);
         root.addView(saveRemoteAccess);
+
+        Button openDeveloperOptions = new Button(this);
+        openDeveloperOptions.setText("Open Android Developer Options");
+        openDeveloperOptions.setOnClickListener((View v) -> openDeveloperOptions());
+        styleSecondaryButton(openDeveloperOptions);
+        root.addView(openDeveloperOptions);
 
         root.addView(sectionTitle("Connectivity Watchdog"));
         tailscaleWatchdogEnabled = new Switch(this);
@@ -142,6 +165,7 @@ public class MainActivity extends Activity {
 
         Button startPairing = new Button(this);
         startPairing.setText("Start Remote Pairing");
+        stylePrimaryButton(startPairing);
         startPairing.setOnClickListener((View v) -> {
             PairingSessionManager.StartResult result = PairingSessionManager.get().start(null, "MainActivity");
             if (!result.ok) showMessage("Pairing is already active.");
@@ -151,6 +175,7 @@ public class MainActivity extends Activity {
 
         Button cancelPairing = new Button(this);
         cancelPairing.setText("Cancel Remote Pairing");
+        styleSecondaryButton(cancelPairing);
         cancelPairing.setOnClickListener((View v) -> {
             PairingSessionManager.get().cancel();
             updateStatus();
@@ -168,10 +193,12 @@ public class MainActivity extends Activity {
         Button refreshTokens = new Button(this);
         refreshTokens.setText("Refresh Clients");
         refreshTokens.setOnClickListener((View v) -> updateStatus());
+        styleSecondaryButton(refreshTokens);
         root.addView(refreshTokens);
 
         Button openSettings = new Button(this);
         openSettings.setText("Open Accessibility Settings");
+        styleSecondaryButton(openSettings);
         openSettings.setOnClickListener((View v) ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(openSettings);
@@ -313,15 +340,28 @@ public class MainActivity extends Activity {
         for (BearerTokenManager.TokenRecord record : records) {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
-            row.setPadding(0, dp(6), 0, dp(10));
+            row.setPadding(dp(16), dp(14), dp(16), dp(16));
+            row.setBackground(roundBackground(Color.WHITE, dp(18)));
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            rowParams.setMargins(0, dp(8), 0, dp(4));
+            tokenList.addView(row, rowParams);
 
             TextView details = bodyText();
             details.setText(tokenSummary(record));
+            details.setTextColor(COLOR_TEXT);
             row.addView(details);
 
             if (!record.revoked) {
+                TextView permissions = label("Permissions");
+                permissions.setTextColor(COLOR_MUTED);
+                permissions.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                addTopMargin(permissions, 8);
+                row.addView(permissions);
+
                 Switch termuxCommands = new Switch(this);
                 termuxCommands.setText("Allow arbitrary commands in Termux");
+                stylePermissionSwitch(termuxCommands);
                 termuxCommands.setChecked(record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND));
                 termuxCommands.setOnCheckedChangeListener((button, enabled) -> {
                     BearerTokenManager manager = new BearerTokenManager(this);
@@ -340,6 +380,7 @@ public class MainActivity extends Activity {
 
                 Switch sensitiveUiControl = new Switch(this);
                 sensitiveUiControl.setText("Allow protected Android controls");
+                stylePermissionSwitch(sensitiveUiControl);
                 sensitiveUiControl.setChecked(record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL));
                 sensitiveUiControl.setOnCheckedChangeListener((button, enabled) -> {
                     if (enabled && !record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL)) {
@@ -356,17 +397,58 @@ public class MainActivity extends Activity {
                 });
                 row.addView(sensitiveUiControl);
 
-                Button revoke = new Button(this);
-                revoke.setText("Revoke " + record.name);
-                revoke.setOnClickListener((View v) -> {
-                    new BearerTokenManager(this).revoke(record.id);
-                    showMessage("Client revoked: " + record.name);
+                Switch adbWirelessEndpoint = new Switch(this);
+                adbWirelessEndpoint.setText("Allow wireless ADB endpoint discovery");
+                stylePermissionSwitch(adbWirelessEndpoint);
+                adbWirelessEndpoint.setChecked(record.hasScope(BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT));
+                adbWirelessEndpoint.setOnCheckedChangeListener((button, enabled) -> {
+                    BearerTokenManager manager = new BearerTokenManager(this);
+                    if (!manager.setScope(record.id, BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT, enabled)) {
+                        showMessage("Could not update wireless ADB permission for " + record.name);
+                    } else {
+                        showMessage((enabled ? "Enabled" : "Disabled") + " wireless ADB discovery for " + record.name);
+                    }
                     updateStatus();
                 });
+                row.addView(adbWirelessEndpoint);
+
+                TextView danger = label("Danger zone");
+                danger.setTextColor(COLOR_DANGER);
+                danger.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                addTopMargin(danger, 16);
+                row.addView(danger);
+
+                Button revoke = new Button(this);
+                revoke.setText("Revoke " + record.name);
+                styleDangerButton(revoke);
+                revoke.setOnClickListener((View v) -> confirmRevokeToken(record));
                 row.addView(revoke);
             }
-            tokenList.addView(row);
         }
+    }
+
+    private void openDeveloperOptions() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+        } catch (RuntimeException error) {
+            startActivity(new Intent(Settings.ACTION_SETTINGS));
+        }
+    }
+
+    private void confirmRevokeToken(BearerTokenManager.TokenRecord record) {
+        new AlertDialog.Builder(this)
+                .setTitle("Revoke client access?")
+                .setMessage("This will immediately disable access for " + record.name + ". This action cannot be undone.")
+                .setPositiveButton("Revoke", (dialog, which) -> {
+                    if (!new BearerTokenManager(this).revoke(record.id)) {
+                        showMessage("Could not revoke " + record.name);
+                    } else {
+                        showMessage("Client revoked: " + record.name);
+                    }
+                    updateStatus();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private String tokenSummary(BearerTokenManager.TokenRecord record) {
@@ -377,6 +459,8 @@ public class MainActivity extends Activity {
                 .append(record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND) ? "allowed" : "not allowed");
         sb.append("\nProtected Android controls: ")
                 .append(record.hasScope(BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL) ? "allowed" : "not allowed");
+        sb.append("\nWireless ADB endpoint: ")
+                .append(record.hasScope(BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT) ? "allowed" : "not allowed");
         sb.append("\nCreated: ").append(BearerTokenManager.instant(record.createdAt));
         if (record.lastUsedAt > 0) sb.append("\nLast used: ").append(BearerTokenManager.instant(record.lastUsedAt));
         if (!record.lastSourceAddress.isEmpty()) sb.append("\nLast source: ").append(record.lastSourceAddress);
@@ -406,14 +490,16 @@ public class MainActivity extends Activity {
         TextView view = new TextView(this);
         view.setText(text);
         view.setTextSize(22);
+        view.setTextColor(COLOR_TEXT);
         view.setTypeface(Typeface.DEFAULT_BOLD);
-        view.setPadding(0, dp(12), 0, dp(8));
+        view.setPadding(0, dp(22), 0, dp(8));
         return view;
     }
 
     private TextView bodyText() {
         TextView view = new TextView(this);
         view.setTextSize(15);
+        view.setTextColor(COLOR_TEXT);
         view.setPadding(0, dp(4), 0, dp(8));
         return view;
     }
@@ -429,6 +515,49 @@ public class MainActivity extends Activity {
         button.setId(id);
         button.setText(text);
         return button;
+    }
+
+    private void stylePrimaryButton(Button button) {
+        button.setAllCaps(false);
+        button.setTextColor(Color.WHITE);
+        button.setBackgroundTintList(ColorStateList.valueOf(COLOR_ACCENT));
+        button.setMinHeight(dp(48));
+    }
+
+    private void styleSecondaryButton(Button button) {
+        button.setAllCaps(false);
+        button.setTextColor(COLOR_ACCENT);
+        button.setBackgroundTintList(ColorStateList.valueOf(Color.rgb(228, 234, 249)));
+        button.setMinHeight(dp(48));
+    }
+
+    private void styleDangerButton(Button button) {
+        button.setAllCaps(false);
+        button.setTextColor(COLOR_DANGER);
+        button.setBackgroundTintList(ColorStateList.valueOf(COLOR_DANGER_BACKGROUND));
+        button.setMinHeight(dp(48));
+    }
+
+    private void stylePermissionSwitch(Switch toggle) {
+        toggle.setTextColor(COLOR_TEXT);
+        toggle.setMinHeight(dp(52));
+        toggle.setPadding(0, dp(3), 0, dp(3));
+    }
+
+    private void addTopMargin(View view, int marginDp) {
+        ViewGroup.LayoutParams raw = view.getLayoutParams();
+        LinearLayout.LayoutParams params = raw instanceof LinearLayout.LayoutParams
+                ? (LinearLayout.LayoutParams) raw
+                : new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(marginDp), 0, 0);
+        view.setLayoutParams(params);
+    }
+
+    private GradientDrawable roundBackground(int color, int radius) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(radius);
+        return background;
     }
 
     private void setPairingDisplayVisible(boolean visible) {

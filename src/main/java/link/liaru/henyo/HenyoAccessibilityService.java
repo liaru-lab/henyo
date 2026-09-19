@@ -144,6 +144,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final List<WsSession> wsSessions = new ArrayList<>();
     private final List<Socket> clientSockets = new ArrayList<>();
     private BearerTokenManager bearerTokens;
+    private AdbWirelessDiscovery adbWirelessDiscovery;
     private ConnectionStatusOverlay connectionStatusOverlay;
     private TailscaleWatchdog tailscaleWatchdog;
 
@@ -158,6 +159,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         targetHistoryStore.clearAll();
         windowRootFailureCache.clearAll();
         bearerTokens = new BearerTokenManager(this);
+        adbWirelessDiscovery = new AdbWirelessDiscovery(this);
         connectionStatusOverlay = new ConnectionStatusOverlay(this, performanceMetrics);
         tailscaleWatchdog = new TailscaleWatchdog(this);
         tailscaleWatchdog.start();
@@ -1507,6 +1509,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             return json(403, "{\"ok\":false,\"error\":\"sensitive_ui_permission_required\",\"code\":\"sensitive_ui_permission_required\"}");
         }
         if ("GET".equals(method) && "/v1/health".equals(path)) return health();
+        if ("GET".equals(method) && "/v1/adb/wireless-endpoint".equals(path)) return adbWirelessEndpoint();
         if ("GET".equals(method) && "/v1/debug/performance".equals(path)) {
             return json(200, "{\"ok\":true,\"performance\":" + performanceMetrics.toJson() + "}");
         }
@@ -1583,6 +1586,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if ("POST".equals(method) && "/v1/auth/tokens/import-local".equals(path)) return ENDPOINT_LOCAL_ONLY_MANAGEMENT;
         if (path.equals("/v1/auth/tokens") || path.startsWith("/v1/auth/tokens/")) return ENDPOINT_TOKEN_MANAGEMENT;
         if (path.equals("/v1/ws/control")) return ENDPOINT_AUTHENTICATED_CONTROL;
+        if (path.equals("/v1/adb/wireless-endpoint")) return ENDPOINT_AUTHENTICATED_CONTROL;
         if (path.startsWith("/v1/app/") || path.startsWith("/v1/ui/")
                 || path.startsWith("/v1/screen/") || path.startsWith("/v1/global/")) {
             return ENDPOINT_AUTHENTICATED_CONTROL;
@@ -1640,6 +1644,24 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 ",\"remoteAccess\":" + withTokenCount(config.summaryJson(activeBindHost, activeRemoteServing)) +
                 ",\"webSocket\":{\"endpoint\":\"/v1/ws/control\",\"activeSessions\":" + activeWsSessions + "}" +
                 ",\"tailscaleWatchdog\":" + watchdog + "}");
+    }
+
+    private Response adbWirelessEndpoint() {
+        String token = requestBearerToken.get();
+        if (token != null && !token.isEmpty()
+                && !tokens().hasActiveScope(token, BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT)) {
+            return json(403, "{\"ok\":false,\"error\":\"adb_wireless_endpoint_permission_required\",\"code\":\"adb_wireless_endpoint_permission_required\"}");
+        }
+        AdbWirelessDiscovery.Result result = adbWirelessDiscovery == null
+                ? AdbWirelessDiscovery.Result.error("service_unavailable")
+                : adbWirelessDiscovery.discover();
+        StringBuilder body = new StringBuilder("{\"ok\":").append(result.ok)
+                .append(",\"available\":").append(result.available)
+                .append(",\"connectPort\":").append(result.connectPort)
+                .append(",\"pairingPort\":").append(result.pairingPort)
+                .append(",\"pairingMode\":").append(result.pairingMode);
+        if (!result.reason.isEmpty()) body.append(",\"reason\":\"").append(escape(result.reason)).append("\"");
+        return json(200, body.append("}").toString());
     }
 
     private String sessionReadyJson(boolean authenticated) {

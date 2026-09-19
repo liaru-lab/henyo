@@ -17,6 +17,7 @@ final class BearerAuthPolicy {
         if (path.equals("/v1/ws/control")) return true;
         return path.startsWith("/v1/app/") || path.startsWith("/v1/ui/")
                 || path.startsWith("/v1/screen/") || path.startsWith("/v1/global/")
+                || path.equals("/v1/adb/wireless-endpoint")
                 || path.startsWith("/v1/termux/");
     }
 
