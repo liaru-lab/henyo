@@ -106,7 +106,11 @@ def verify_ws_payloads():
         assert ws.set_progress("3件確認", steps=plan, replan=True)["ok"]
         assert ws.set_progress("3件取得", ["1件取得"], "2件目を確認")["ok"]
         assert ws.finish_progress()["ok"]
+        assert not ws.task_id and ws.completed_task_id
         assert ws.show_completion("完了しました。")["ok"]
+        assert ws.call("ui.click", {"text": "Synthetic next task"})["ok"]
+        assert captured[6]["taskId"] != captured[0]["taskId"]
+        assert not ws.completed_task_id
     finally:
         helper.encode_client_text = original_encode
 
@@ -117,7 +121,11 @@ def verify_ws_payloads():
     assert captured[0]["timeoutMs"] == 120_000
     assert captured[1]["display"] == {"summary": "メッセージを送ります"}
     assert captured[1]["steps"] == steps
-    for frame in captured[2:]:
+    task_id = captured[0]["taskId"]
+    assert task_id.startswith("task-") and len(task_id) <= 128
+    for frame in captured[:6]:
+        assert frame.pop("taskId") == task_id
+    for frame in captured[2:6]:
         assert frame.pop("timeoutMs") == 10_000
     assert captured[2] == {
         "type": "call", "id": captured[2]["id"], "op": "task.progress.set",
@@ -513,6 +521,7 @@ def verify_blocked_reader_shutdown():
         time.sleep(0.02)
         ws.close()
         assert finished.wait(1), "close must unblock a pending receive"
+        assert not ws.task_id and not ws.completed_task_id
         peer.settimeout(1)
         assert peer.recv(1) == b"", "peer must immediately observe disconnection"
     finally:

@@ -13,6 +13,10 @@ final class ControlOwnership {
     synchronized String owner() { return owner; }
     synchronized String state() { return stopped ? "stopped" : owner.isEmpty() ? "available" : "active"; }
 
+    synchronized boolean isCurrent(long ticket, String candidate) {
+        return !stopped && ticket == generation && (owner.isEmpty() || owner.equals(candidate));
+    }
+
     synchronized void stop() {
         stopped = true;
         owner = "";
@@ -30,6 +34,12 @@ final class ControlOwnership {
             owner = "";
             generation++;
         }
+    }
+
+    synchronized void completeTask(String candidate) {
+        if (!owner.isEmpty() && !owner.equals(candidate)) throw new Unavailable("control_owned");
+        owner = "";
+        generation++;
     }
 
     synchronized void check(long ticket, String candidate) {

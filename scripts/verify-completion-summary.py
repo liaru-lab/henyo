@@ -77,14 +77,14 @@ public final class CompletionMessageModelTest {
                 "a rejected replacement must not alter the visible completion");
 
         check(model.current(2_000L + CompletionMessageModel.MESSAGE_HOLD_MS) != null,
-                "completion must remain for the full 30-second hold");
+                "completion must remain for the full brief hold");
         check(model.current(2_000L + CompletionMessageModel.MESSAGE_HOLD_MS
                 + CompletionMessageModel.MESSAGE_FADE_OUT_MS) == null,
                 "completion must clear after the following fade");
-        check(CompletionMessageModel.MESSAGE_HOLD_MS == 30_000L,
-                "completion hold contract must remain 30 seconds");
-        check(CompletionMessageModel.MESSAGE_FADE_OUT_MS == 1_800L,
-                "completion must use the existing gentle fade duration");
+        check(CompletionMessageModel.MESSAGE_HOLD_MS == 2_500L,
+                "completion must briefly return status before dismissal");
+        check(CompletionMessageModel.MESSAGE_FADE_OUT_MS == 500L,
+                "completion must fade without covering the next task");
     }
 }
 '''
@@ -146,12 +146,11 @@ def verify_contract_and_rendering() -> None:
     require(OPERATIONS, 'OP_TASK_COMPLETION_SHOW = "task.completion.show"',
             "dedicated completion WS operation is required")
     require(SERVICE, '"completion_too_long"', "WS over-limit error must be stable")
-    require(SERVICE, '"completion_progress_active"',
-            "completion must reject stale active progress")
-    require(SERVICE, 'overlay.showTaskCompletion(message)',
-            "completion text must reach only the completion presentation path")
-    require(OVERLAY, "if (!progressModel.isEmpty()) return CompletionMessageModel.SHOW_PROGRESS_ACTIVE;",
-            "completion and progress must never double-stack")
+    require(SERVICE, '"stale_task"', "completion must reject a different task identity")
+    require(SERVICE, 'overlay.completeTask(message, completed, presentationGuard(completed))',
+            "completion text must use the guarded completion path")
+    require(OVERLAY, "clearTaskProgressOnMain(null, true);",
+            "validated completion must replace progress without double-stacking")
     require(OVERLAY, "activityModel.clear();",
             "completion must not inherit stale operation captions")
     require(OVERLAY, ".setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)",

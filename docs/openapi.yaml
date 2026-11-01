@@ -19,6 +19,10 @@ info:
     One absolute five-second deadline covers headers and body. Transfer-Encoding
     and repeated Content-Length are rejected. See docs/http-transport.md.
 
+    Mutations may carry an opaque taskId in the body or query to group a task.
+    Task completion is a WebSocket operation requiring the same ID; the helper
+    generates IDs automatically. See docs/ws-control-protocol.md.
+
     Remote access is disabled by default. The default listener is
     `127.0.0.1:8765`, which keeps existing Termux-on-device workflows local.
     When remote access is explicitly enabled, the service may bind to a
@@ -895,6 +899,9 @@ components:
         - request_line_too_large
         - headers_too_large
         - body_too_large
+        - task_id_required
+        - task_id_invalid
+        - stale_task
     ErrorResponse:
       type: object
       required: [ok, error, code]

@@ -245,9 +245,10 @@ into a summary automatically.
 
 Completed multi-step tasks use the separate `task.completion.show` presentation,
 not `display.summary`. It wraps a final message of up to 250 Unicode code points
-in full without ellipsis, spinner, or caret, holds for 30 seconds, then fades
-gently. Callers explicitly finish task progress first, so the final result never
-double-stacks a stale plan. Completion text is ephemeral and is not echoed,
+in full without ellipsis, spinner, or caret, and disappears after about three
+seconds or an immediate `Dismiss`. Completion returns control and clears the
+task's comments and plan. Unique task IDs prevent stale completion from ending
+newer work; the helper manages them automatically. Completion text is not echoed,
 logged, persisted, cached, included in diagnostics, or replayed.
 
 Tree, find, wait, screenshot, and combined observation calls add one restrained

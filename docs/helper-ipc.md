@@ -432,8 +432,8 @@ does not echo supplied progress text.
 
 ## Task completion presentation
 
-Personal Assistant must finish progress and wait for success before presenting
-the final readable result:
+The helper tracks an ephemeral task ID automatically. Completion can finish
+progress and release ownership in one call; a separate finish remains supported:
 
 ```json
 {"cmd":"progress.finish"}
@@ -444,9 +444,12 @@ The helper validates a required non-empty string with at most 250 Unicode code
 points, counting a supplementary character once, then sends exactly one
 `task.completion.show` call with `params.message`. Exactly 250 is accepted;
 251 returns stable `completion_too_long` without sending a WS call. The Android
-side returns `completion_progress_active` if progress was not explicitly
-finished. Success is the unchanged WS result and contains only
-`{"ok":true,"applied":true}`; it never echoes the message.
+side validates the task ID before clearing progress and releasing ownership.
+Success includes `controlState:"available"` and `presentationAccepted` without
+echoing the message. The message lasts 2.5 seconds plus a 0.5-second fade and
+offers `Dismiss`. A stale completion cannot clear a new task. The helper uses a
+fresh ID for the next mutation and drops task IDs on disconnect; it never
+replays a task or a completion. Raw WebSocket clients must migrate to task IDs.
 
 The helper does not cache, log, persist, expose through status/discovery, or
 replay completion text. A newer completion replaces the prior presentation.

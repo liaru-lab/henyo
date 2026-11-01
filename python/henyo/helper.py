@@ -47,6 +47,7 @@ KNOWN_OPERATOR_ACTIONS = frozenset({"physical_reboot_then_first_unlock"})
 KNOWN_CAPABILITY_FEATURES = frozenset({
     "expectedServiceEpoch",
     "mutationOutcome",
+    "taskLifecycle",
     "internalControlOwner",
     "windowTargeting",
     "explicitCaptureMode",
@@ -472,6 +473,11 @@ BATCH_MUTATING_OPS = frozenset({
     "global.home",
 })
 
+TASK_MUTATING_OPS = BATCH_MUTATING_OPS | frozenset({
+    "app.activate", "termux.exec", "input.text", "input.key", "task.progress.set",
+})
+TASK_FINISH_OPS = frozenset({"task.progress.finish", "task.completion.show"})
+
 
 class HelperTransport:
     def __init__(
@@ -614,6 +620,8 @@ class WsClient:
         self.last_error = ""
         self.reader: Optional[threading.Thread] = None
         self.generation = 0
+        self.task_id = ""
+        self.completed_task_id = ""
         self.on_disconnect = on_disconnect
         import queue
         self.queue_mod = queue
@@ -697,6 +705,8 @@ class WsClient:
                 self.generation += 1
                 pending = list(self.pending.values())
                 self.pending.clear()
+                self.task_id = ""
+                self.completed_task_id = ""
             try:
                 # Unblock the reader before close so the peer observes EOF now,
                 # rather than after another frame or the remote idle deadline.
@@ -741,6 +751,25 @@ class WsClient:
                         backoff = min(2.0, backoff * 2)
             return False
 
+    def _task_for(self, op: str) -> str:
+        # Called under the send lock. IDs are unique per task and never replayed.
+        if op in TASK_MUTATING_OPS:
+            if not self.task_id:
+                self.task_id = "task-" + secrets.token_hex(16)
+                self.completed_task_id = ""
+            return self.task_id
+        if op in TASK_FINISH_OPS:
+            if not self.task_id and not self.completed_task_id:
+                self.task_id = "task-" + secrets.token_hex(16)
+            return self.task_id or self.completed_task_id
+        return ""
+
+    def _task_finished(self, task_id: str) -> None:
+        with self.lock:
+            if self.task_id == task_id:
+                self.completed_task_id = task_id
+                self.task_id = ""
+
     def call(
         self,
         op: str,
@@ -765,6 +794,9 @@ class WsClient:
                 q: "queue.Queue[Dict[str, Any]]" = self.queue_mod.Queue(maxsize=1)
                 self.pending[request_id] = q
                 payload = {"type": "call", "id": request_id, "op": op, "params": params or {}}
+                task_id = self._task_for(op)
+                if task_id:
+                    payload["taskId"] = task_id
                 if action_id:
                     payload["actionId"] = action_id
                 if expected_service_epoch is not None:
@@ -779,7 +811,10 @@ class WsClient:
             self.close(expected_sock=sock)
             return {"ok": False, "error": "ws_disconnected", "outcome": "unknown", "retrySafe": False}
         try:
-            return q.get(timeout=timeout)
+            result = q.get(timeout=timeout)
+            if result.get("ok") and op in TASK_FINISH_OPS:
+                self._task_finished(task_id)
+            return result
         except Exception:
             return {"ok": False, "error": "timeout", "outcome": "unknown", "retrySafe": False}
         finally:
@@ -817,6 +852,14 @@ class WsClient:
                     "stopOnError": stop_on_error,
                     "returnTree": return_tree,
                 }
+                task_ops = [step.get("op", "") for step in steps if isinstance(step, dict)]
+                task_id = ""
+                for task_op in task_ops:
+                    if task_op in TASK_MUTATING_OPS or task_op in TASK_FINISH_OPS:
+                        task_id = self._task_for(task_op)
+                        break
+                if task_id:
+                    payload["taskId"] = task_id
                 payload["timeoutMs"] = timeout_ms if timeout_ms is not None else min(
                     MAX_BATCH_TIMEOUT_MS, max(1, int(wait_timeout * 1000)))
                 if action_id:
@@ -829,7 +872,12 @@ class WsClient:
             self.close(expected_sock=sock)
             return {"ok": False, "error": "ws_disconnected", "outcome": "unknown", "retrySafe": False}
         try:
-            return q.get(timeout=wait_timeout)
+            result = q.get(timeout=wait_timeout)
+            results = result.get("result", {}).get("steps", []) if result.get("ok") else []
+            if any(step.get("ok") and index < len(task_ops) and task_ops[index] in TASK_FINISH_OPS
+                   for index, step in enumerate(results)):
+                self._task_finished(task_id)
+            return result
         except Exception:
             return {"ok": False, "error": "timeout", "outcome": "unknown", "retrySafe": False}
         finally:

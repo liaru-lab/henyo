@@ -220,10 +220,18 @@ postcondition verification. A failed postcondition must not erase that success.
 
 ## Task Progress Presentation
 
+Mutating calls and progress updates should carry an opaque top-level `taskId`
+shared by one task. Use a fresh ID for each new task; never reuse an old one.
+IDs contain 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`, beginning with a
+letter or digit. The helper generates and attaches IDs automatically, including
+on mutating batches. Raw clients must provide the same ID when finishing.
+Legacy mutations without an ID remain accepted, but completion requires
+migration to task IDs (`task_id_required`); malformed IDs use `task_id_invalid`.
+
 `task.progress.set` accepts an ordered structured plan snapshot:
 
 ```json
-{"type":"call","id":"progress-1","op":"task.progress.set","params":{"goal":"3件の確認を完了する","steps":[{"text":"1件目を確認","status":"completed"},{"text":"2件目を確認","status":"in_progress"},{"text":"3件目を確認","status":"pending"}],"replan":false}}
+{"type":"call","id":"progress-1","taskId":"task-example-1","op":"task.progress.set","params":{"goal":"3件の確認を完了する","steps":[{"text":"1件目を確認","status":"completed"},{"text":"2件目を確認","status":"in_progress"},{"text":"3件目を確認","status":"pending"}],"replan":false}}
 ```
 
 `status` is exactly `pending`, `in_progress`, or `completed`. Henyo renders all
@@ -241,7 +249,7 @@ plan has a fixed presentation anchor independent of per-operation
 For migration, the legacy complete snapshot remains accepted:
 
 ```json
-{"type":"call","id":"progress-1","op":"task.progress.set","params":{"goal":"レビュー本文を異なる3件分取得できたら終了","completed":["1件目を取得"],"current":"2件目の本文を確認"}}
+{"type":"call","id":"progress-1","taskId":"task-example-1","op":"task.progress.set","params":{"goal":"レビュー本文を異なる3件分取得できたら終了","completed":["1件目を取得"],"current":"2件目の本文を確認"}}
 ```
 
 In this legacy form, `goal` and `current` are strings and `completed` is a
@@ -254,44 +262,53 @@ row. The result never echoes supplied text:
 {"type":"result","id":"progress-1","ok":true,"result":{"ok":true,"applied":true},"durationMs":4}
 ```
 
-Finish or cancel explicitly so stale presentation is removed:
+Finish explicitly when work is complete:
 
 ```json
-{"type":"call","id":"progress-2","op":"task.progress.finish","params":{}}
-{"type":"result","id":"progress-2","ok":true,"result":{"ok":true,"applied":true,"cleared":true},"durationMs":2}
+{"type":"call","id":"progress-2","taskId":"task-example-1","op":"task.progress.finish","params":{}}
+{"type":"result","id":"progress-2","ok":true,"result":{"ok":true,"applied":true,"cleared":true,"controlState":"available"},"durationMs":2}
 ```
 
-`cleared:false` is an idempotent success meaning no progress was visible. The
-overlay continues to show separately supplied `display.summary` captions,
-except that a sanitized caption identical to the current progress action is
-suppressed rather than drawn twice.
+Completion immediately releases that task's ownership, clears comments, plan,
+cursor, and glow, and briefly shows `Completed`. `cleared` acknowledges the
+completion presentation path. The user can select `Dismiss` immediately;
+otherwise it disappears after 2.5 seconds plus a 0.5-second fade. Dismiss only
+hides presentation and does not claim to stop work. The connection stays open.
+Repeated finish is idempotent and cannot redisplay a dismissed message. A finish
+for a different task returns `stale_task`; another owner uses `control_owned`.
+Neither clears newer work.
+Stop remains a separate explicit user action; disconnect releases ownership
+without reporting completion. A failed operation leaves the task active until
+the client finishes or the user stops it.
 
 ## Task Completion Presentation
 
-After a multi-step task is actually complete, first send `task.progress.finish`
-and wait for its successful response. Then send one dedicated completion call:
+`task.completion.show` can finish a task and supply its final message in one
+call. It also accepts a message for the just-finished task after
+`task.progress.finish`, while no newer task has started:
 
 ```json
-{"type":"call","id":"completion-1","op":"task.completion.show","params":{"message":"訪問情報が揃いました。王立美術館は評価4.5で現在は18時まで営業、公式チケット表示は13ユーロです。中央駅から徒歩約8分。展示は好評で待ち時間なしの声が多い一方、受付対応には厳しい意見もありました。"}}
+{"type":"call","id":"completion-1","taskId":"task-example-1","op":"task.completion.show","params":{"message":"Completed the requested checks."}}
 ```
 
 `params.message` is a required non-empty JSON string of at most 250 Unicode
 code points. Supplementary characters count as one code point. Henyo preserves
 every accepted code point, wraps the full message without ellipsis, shows no
-spinner or caret, holds it for 30 seconds, and then fades it over 1.8 seconds.
-A newer accepted completion replaces the prior one. A later ordinary operation
-caption dismisses the completion because work has resumed.
+spinner or caret, holds it for 2.5 seconds, and then fades it over 0.5 seconds.
+An accepted message replaces the same task's visible completion. Once dismissed,
+duplicate completion cannot revive it. New work invalidates old dismissal timers.
 
 Henyo rejects an over-limit message with stable code `completion_too_long` and
 does not alter the current completion. Missing, empty, or non-string input uses
-`completion_invalid`. If task progress is still visible, the call fails with
-`completion_progress_active`; callers must explicitly finish progress and then
-retry the completion call. Henyo never silently clears progress for this API.
+`completion_invalid`. Valid completion clears that task's progress as part of
+the lifecycle transition. A stale task ID never releases newer ownership.
 
-Success acknowledges presentation only and never echoes the supplied message:
+Success acknowledges control release and never echoes the supplied message.
+`presentationAccepted` is false if the overlay could not be updated; that does
+not undo control release:
 
 ```json
-{"type":"result","id":"completion-1","ok":true,"result":{"ok":true,"applied":true},"durationMs":3}
+{"type":"result","id":"completion-1","ok":true,"result":{"ok":true,"applied":true,"controlState":"available","presentationAccepted":true},"durationMs":3}
 ```
 
 The message is presentation-only and ephemeral. Henyo does not log it, include
@@ -301,6 +318,10 @@ to display final text. Continue using short `display.summary` only for immediate
 per-operation intent.
 
 ## Batch
+
+A top-level `taskId` is inherited by steps that omit it. Finish/completion must
+be the last mutating step: releasing control invalidates the batch's old ticket.
+Use one final `task.completion.show` when a final message is needed.
 
 Batch request:
 

@@ -165,21 +165,22 @@ provide useful per-operation intent where it adds distinct context.
 
 ## Task Completion Presentation
 
-After all task work is complete, explicitly finish progress and only then show
-one readable final result:
+After all task work is complete, show one readable final result. Completion
+also finishes progress and returns control to the user. A separate
+`bin/henyo progress finish` remains available when no final message is needed:
 
 ```sh
-bin/henyo progress finish
 bin/henyo completion show "確認が完了しました。最終結果は3件です。"
 ```
 
 Use `--intent` for one short immediate operation explanation; use
 `completion show` for the multi-sentence final result. Completion accepts at
 most 250 Unicode code points, renders accepted text in full without a spinner,
-caret, or ellipsis, remains for 30 seconds, and replaces an earlier completion.
-If it returns `completion_too_long`, rewrite the result more concisely. If it
-returns `completion_progress_active`, call `progress finish`, wait for success,
-then retry. Never misuse `current`, `tree`, or another unrelated call to show
+caret, or ellipsis, and automatically disappears after about three seconds.
+The user can select `Dismiss` immediately. The helper manages unique task IDs;
+stale completion cannot finish newer work. If it returns `completion_too_long`,
+rewrite the result more concisely. Never retry a `stale_task` completion against
+a newer task. Never misuse `current`, `tree`, or another unrelated call to show
 text. Do not include secrets or unrelated private content; Henyo does not log,
 persist, cache, echo, discover, or replay the completion message.
 

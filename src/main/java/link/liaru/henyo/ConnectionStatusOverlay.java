@@ -74,6 +74,11 @@ final class ConnectionStatusOverlay {
     private final TargetVisualState targetVisualState = new TargetVisualState();
     private boolean connected;
     private boolean controlStopped;
+    private boolean completedPresentation;
+    private boolean presentationSuppressed;
+    private long presentationGeneration;
+    private Object lastCompletedTask;
+    private String lastCompletionMessage = "";
     private Runnable stopControl;
     private Runnable resumeControl;
     private android.widget.Button controlButton;
@@ -116,12 +121,15 @@ final class ConnectionStatusOverlay {
             try { windowManager.removeView(controlButton); } catch (RuntimeException ignored) { }
             controlButton = null;
         }
-        if (destroyed || captureSuppressionDepth > 0 || (!connected && !controlStopped)
+        if (destroyed || captureSuppressionDepth > 0 || (presentationSuppressed && !controlStopped)
+                || (!connected && !controlStopped)
                 || windowManager == null || stopControl == null) return;
         android.widget.Button button = new android.widget.Button(service);
-        button.setText(controlStopped ? "Resume control" : "Stop control");
+        button.setText(controlStopped ? "Resume control" : completedPresentation ? "Dismiss" : "Stop control");
         button.setOnClickListener(v -> {
-            if (controlStopped) resumeControl.run(); else stopControl.run();
+            if (controlStopped) resumeControl.run();
+            else if (completedPresentation) dismissCompletedPresentation();
+            else stopControl.run();
         });
         WindowManager.LayoutParams layout = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -137,14 +145,18 @@ final class ConnectionStatusOverlay {
     }
 
     void noteControlActivity(String summary) {
+        noteControlActivity(summary, () -> true);
+    }
+
+    void noteControlActivity(String summary, java.util.function.BooleanSupplier guard) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            noteControlActivityOnMain(summary);
+            if (guard.getAsBoolean()) noteControlActivityOnMain(summary);
             return;
         }
         CountDownLatch applied = new CountDownLatch(1);
         mainHandler.post(() -> {
             try {
-                noteControlActivityOnMain(summary);
+                if (guard.getAsBoolean()) noteControlActivityOnMain(summary);
             } finally {
                 applied.countDown();
             }
@@ -158,10 +170,11 @@ final class ConnectionStatusOverlay {
         }
     }
 
-    boolean setTaskProgress(Object owner, String goal, List<String> completed, String current) {
+    boolean setTaskProgress(Object owner, String goal, List<String> completed, String current,
+            java.util.function.BooleanSupplier guard) {
         if (owner == null) return false;
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            return setTaskProgressOnMain(owner, goal, completed, current);
+            return guard.getAsBoolean() && setTaskProgressOnMain(owner, goal, completed, current);
         }
         CountDownLatch applied = new CountDownLatch(1);
         AtomicBoolean pending = new AtomicBoolean(true);
@@ -169,7 +182,7 @@ final class ConnectionStatusOverlay {
         mainHandler.post(() -> {
             try {
                 if (!pending.compareAndSet(true, false)) return;
-                accepted[0] = setTaskProgressOnMain(owner, goal, completed, current);
+                accepted[0] = guard.getAsBoolean() && setTaskProgressOnMain(owner, goal, completed, current);
             } finally {
                 applied.countDown();
             }
@@ -187,10 +200,11 @@ final class ConnectionStatusOverlay {
     }
 
     int setTaskProgressPlan(Object owner, String goal,
-            List<TaskProgressModel.Step> steps, boolean replan) {
+            List<TaskProgressModel.Step> steps, boolean replan, java.util.function.BooleanSupplier guard) {
         if (owner == null) return TaskProgressModel.UPDATE_UNAVAILABLE;
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            return setTaskProgressPlanOnMain(owner, goal, steps, replan);
+            return guard.getAsBoolean() ? setTaskProgressPlanOnMain(owner, goal, steps, replan)
+                    : TaskProgressModel.UPDATE_UNAVAILABLE;
         }
         CountDownLatch applied = new CountDownLatch(1);
         AtomicBoolean pending = new AtomicBoolean(true);
@@ -198,7 +212,7 @@ final class ConnectionStatusOverlay {
         mainHandler.post(() -> {
             try {
                 if (!pending.compareAndSet(true, false)) return;
-                result[0] = setTaskProgressPlanOnMain(owner, goal, steps, replan);
+                if (guard.getAsBoolean()) result[0] = setTaskProgressPlanOnMain(owner, goal, steps, replan);
             } finally {
                 applied.countDown();
             }
@@ -247,33 +261,57 @@ final class ConnectionStatusOverlay {
         mainHandler.post(() -> clearTaskProgressOnMain(owner, false));
     }
 
-    int showTaskCompletion(String message) {
-        int validation = CompletionMessageModel.validate(message);
-        if (validation != CompletionMessageModel.SHOW_ACCEPTED) return validation;
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return showTaskCompletionOnMain(message);
-        }
+    boolean completeTask(String message, Object task, java.util.function.BooleanSupplier guard) {
+        if (CompletionMessageModel.validate(message) != CompletionMessageModel.SHOW_ACCEPTED) return false;
+        if (Looper.myLooper() == Looper.getMainLooper()) return guard.getAsBoolean() && completeTaskOnMain(message, task, guard);
         CountDownLatch applied = new CountDownLatch(1);
         AtomicBoolean pending = new AtomicBoolean(true);
-        int[] result = {CompletionMessageModel.SHOW_INVALID};
+        boolean[] result = {false};
         mainHandler.post(() -> {
             try {
-                if (!pending.compareAndSet(true, false)) return;
-                result[0] = showTaskCompletionOnMain(message);
-            } finally {
-                applied.countDown();
-            }
+                if (pending.compareAndSet(true, false) && guard.getAsBoolean())
+                    result[0] = completeTaskOnMain(message, task, guard);
+            } finally { applied.countDown(); }
         });
         try {
-            if (!applied.await(1_500L, TimeUnit.MILLISECONDS)) {
-                pending.compareAndSet(true, false);
-                return CompletionMessageModel.SHOW_INVALID;
-            }
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-            return CompletionMessageModel.SHOW_INVALID;
-        }
+            if (!applied.await(1_500L, TimeUnit.MILLISECONDS)) { pending.set(false); return false; }
+        } catch (InterruptedException e) { pending.set(false); Thread.currentThread().interrupt(); return false; }
         return result[0];
+    }
+
+    private boolean completeTaskOnMain(String message, Object task, java.util.function.BooleanSupplier guard) {
+        if (destroyed || !connected || controlStopped) return false;
+        if (lastCompletedTask == task && (!completedPresentation || lastCompletionMessage.equals(message))) return true;
+        lastCompletedTask = task; lastCompletionMessage = message;
+        clearTaskProgressOnMain(null, true);
+        activityModel.clear();
+        visualModel.clearActivity(); visualModel.clearScan(); visualModel.clearCursor(); visualCoordinates.clear();
+        active = false; fadingOut = false;
+        mainHandler.removeCallbacks(returnToIdle); mainHandler.removeCallbacks(finishFadeOut);
+        removeView();
+        completionModel.show(message, SystemClock.uptimeMillis());
+        completedPresentation = true; presentationSuppressed = false;
+        long generation = ++presentationGeneration;
+        ensureActivityView(); refreshControlButton();
+        mainHandler.postDelayed(() -> {
+            if (generation == presentationGeneration && guard.getAsBoolean()) dismissCompletedPresentation();
+        }, CompletionMessageModel.MESSAGE_HOLD_MS + CompletionMessageModel.MESSAGE_FADE_OUT_MS);
+        return true;
+    }
+
+    private void dismissCompletedPresentation() {
+        if (!completedPresentation) return;
+        completionModel.clear(); completedPresentation = false; presentationSuppressed = true;
+        presentationGeneration++;
+        removeView(); refreshControlButton();
+    }
+
+    private void beginPresentation() {
+        boolean refresh = completedPresentation || presentationSuppressed;
+        lastCompletedTask = null; lastCompletionMessage = "";
+        completedPresentation = false; presentationSuppressed = false; presentationGeneration++;
+        completionModel.clear();
+        if (refresh) refreshControlButton();
     }
 
     void showObservation(String logicalId) {
@@ -333,7 +371,7 @@ final class ConnectionStatusOverlay {
 
     private void postVisual(Runnable update) {
         mainHandler.post(() -> {
-            if (destroyed || !connected) return;
+            if (destroyed || !connected || completedPresentation || presentationSuppressed) return;
             update.run();
             ensureActivityView();
             if (activityView != null) activityView.invalidate();
@@ -491,6 +529,8 @@ final class ConnectionStatusOverlay {
         connected = value;
         refreshControlButton();
         if (!connected) {
+            completedPresentation = false; presentationSuppressed = false; presentationGeneration++;
+            lastCompletedTask = null; lastCompletionMessage = "";
             active = false;
             fadingOut = false;
             visualModel.clearActivity();
@@ -511,7 +551,7 @@ final class ConnectionStatusOverlay {
 
     private void noteControlActivityOnMain(String summary) {
         if (destroyed || !connected) return;
-        completionModel.clear();
+        beginPresentation();
         ensureView();
         visualModel.noteActivity(SystemClock.uptimeMillis());
         ensureActivityView();
@@ -541,6 +581,7 @@ final class ConnectionStatusOverlay {
     private boolean setTaskProgressOnMain(Object owner, String goal,
             List<String> completed, String current) {
         if (destroyed || !connected) return false;
+        beginPresentation();
         progressOwner = owner;
         long now = SystemClock.uptimeMillis();
         boolean changed = progressModel.set(goal, completed, current, now);
@@ -560,6 +601,7 @@ final class ConnectionStatusOverlay {
         int result = progressModel.setPlan(goal, steps, replan, now);
         if (result == TaskProgressModel.UPDATE_INVALID
                 || result == TaskProgressModel.UPDATE_PLAN_MISMATCH) return result;
+        beginPresentation();
         progressOwner = owner;
         activityModel.removeSummary(progressModel.current());
         ensureActivityView();
@@ -577,17 +619,6 @@ final class ConnectionStatusOverlay {
         if (activityView != null) activityView.noteProgressChanged();
         removeActivityViewIfEmpty();
         return cleared;
-    }
-
-    private int showTaskCompletionOnMain(String message) {
-        if (destroyed || !connected) return CompletionMessageModel.SHOW_INVALID;
-        if (!progressModel.isEmpty()) return CompletionMessageModel.SHOW_PROGRESS_ACTIVE;
-        int result = completionModel.show(message, SystemClock.uptimeMillis());
-        if (result != CompletionMessageModel.SHOW_ACCEPTED) return result;
-        activityModel.clear();
-        ensureActivityView();
-        if (activityView != null) activityView.noteCompletionChanged();
-        return result;
     }
 
     private void returnToIdleIfDue() {
@@ -616,7 +647,8 @@ final class ConnectionStatusOverlay {
     }
 
     private void ensureView() {
-        if (view != null || windowManager == null || captureSuppressionDepth > 0) return;
+        if (view != null || windowManager == null || captureSuppressionDepth > 0
+                || presentationSuppressed || completedPresentation) return;
         view = new IndicatorView(service, visualModel);
         view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         view.setContentDescription(null);
