@@ -191,8 +191,32 @@ Call result:
 {"type":"result","id":"c1","ok":true,"result":{"ok":true,"strategy":"node"},"durationMs":42}
 ```
 
-`timeoutMs` may be included on any call. If omitted, Henyo chooses an
-operation-appropriate default. Timeouts return `op_timeout`.
+`timeoutMs` bounds a call's lifetime from admission, including time waiting for
+the execution queue (1–120000 ms; raw clients default to 120000 ms). Each mutation
+dispatch rechecks that lifetime. Expired queued calls return `deadline_exceeded`
+with `outcome:"not_applied"` and cannot execute later. The helper sends a budget
+even when the caller uses its default transport wait.
+
+Operation-specific waits still use `params.timeout`; `timeoutMs` does not replace
+those defaults. A dispatched operation may finish after its lifetime expires.
+A helper transport timeout returns `outcome:"unknown", retrySafe:false`: it is
+not evidence that the operation was canceled or never applied. Observe current
+state before deciding whether a mutation is safe to repeat.
+
+Explicit `ui.setText` selectors never fall back to another focused field. With
+no non-empty selector, only the focused editable field in the selected target
+window is eligible; another window's retained focus is not a fallback. A missing
+selector target returns `not_found`; unavailable or incompletely traversed trees
+return `tree_unavailable`. In particular, `ui.wait` with `gone:true` cannot use an
+unavailable tree as proof of disappearance.
+
+Rejected Android actions return `action_rejected` rather than a successful frame
+containing `ok:false`. Structured failures distinguish `outcome:"not_applied"`
+from `outcome:"unknown"` when earlier dispatches in a compound operation may have
+changed the UI. HTTP failures carry the same outcome; formerly successful HTTP
+responses with `ok:false` now use status 409. Successful mutations continue to
+mean Android accepted the request, independently of subsequent foreground or
+postcondition verification. A failed postcondition must not erase that success.
 
 ## Task Progress Presentation
 
@@ -329,6 +353,10 @@ the returned ordered step prefix ends with a synthetic failure whose `id` is
 `batch-timeout`, `ok` is `false`, and `code` is `batch_timeout`.
 `stoppedOnError` is then `true`. A timeout after the final requested step does
 not add a synthetic result.
+The batch lifetime also begins at admission, including queue time (maximum
+300000 ms). Per-step budgets can tighten, but never extend, the batch deadline.
+Completed step results remain explicit; a client transport timeout leaves the
+overall batch outcome unknown and must not trigger an automatic replay.
 
 ## Local performance diagnostics
 

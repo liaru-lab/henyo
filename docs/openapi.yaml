@@ -5,6 +5,15 @@ info:
   description: |
     Local device UI control API for Henyo accessibility backends.
 
+    Control requests may include timeoutMs (1 through 120000) in the JSON body
+    or query. This admission budget includes queueing and is rechecked before
+    mutation dispatch; it does not replace operation-specific timeout values.
+    Expired queued work is rejected with deadline_exceeded and cannot run later.
+    Failure outcomes distinguish not_applied from unknown after earlier dispatch.
+    A transport timeout never proves cancellation; do not automatically replay
+    an uncertain mutation. Rejected Android actions use status 409 rather than
+    a successful response containing ok:false.
+
     Remote access is disabled by default. The default listener is
     `127.0.0.1:8765`, which keeps existing Termux-on-device workflows local.
     When remote access is explicitly enabled, the service may bind to a
@@ -866,6 +875,16 @@ components:
         - not_found
         - conflict
         - adb_wireless_endpoint_permission_required
+        - action_rejected
+        - deadline_exceeded
+        - tree_unavailable
+        - invalid_selector
+        - stale_target
+        - control_stopped
+        - control_owned
+        - token_management_permission_required
+        - sensitive_ui_permission_required
+        - op_failed
     ErrorResponse:
       type: object
       required: [ok, error, code]
@@ -877,6 +896,9 @@ components:
           type: string
         code:
           $ref: "#/components/schemas/ErrorCode"
+        outcome:
+          type: string
+          enum: [not_applied, unknown]
     AuthErrorResponse:
       allOf:
         - $ref: "#/components/schemas/ErrorResponse"
@@ -1319,6 +1341,7 @@ components:
           type: string
     SetTextRequest:
       type: object
+      description: An explicit selector never falls back to another field. Without a non-empty selector, only input focus in the selected target window is used.
       required: [value]
       properties:
         selector:
@@ -1420,6 +1443,7 @@ components:
             gone:
               type: boolean
               default: false
+              description: Absence must be confirmed by a complete available tree; unavailable trees return tree_unavailable.
     GoneResponse:
       type: object
       required: [ok, gone]

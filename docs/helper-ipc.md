@@ -267,7 +267,12 @@ rejected value. When both fields are absent, legacy behavior is unchanged.
 unchanged on the WebSocket call frame, waits five additional seconds for the
 response, and permits local IPC callers a further five-second margin. It never
 retries or replays a timed-out call. Omitting it preserves the existing
-operation-specific call defaults.
+operation-specific transport waits and sends a server admission budget derived
+from that wait (capped at 120000 ms). It does not overwrite `params.timeout`.
+Pending calls interrupted by a transport timeout or disconnect return
+`outcome:"unknown", retrySafe:false`. Refresh observations before deciding
+whether a mutation is safe to repeat. Closing a helper connection shuts down its
+socket before close, so a blocked reader cannot delay remote lease release.
 
 ## User-visible action intent
 
@@ -302,7 +307,9 @@ further five-second margin. Thus `timeoutMs:25000` uses an approximately
 30-second WebSocket wait and a 35-second IPC read timeout. An explicitly
 configured `HENYO_HELPER_READ_TIMEOUT` may increase, but cannot shorten, that
 required IPC deadline. Omitting `timeoutMs` preserves the legacy 20-second
-WebSocket and 30-second IPC waits and sends no Android batch deadline.
+WebSocket and 30-second IPC waits and sends a 20000 ms admission budget.
+The server checks this budget after queueing and before every remaining action;
+per-step budgets cannot extend it. A timed-out batch must not be replayed.
 
 The generic `screen.screenshot` call derives its WebSocket wait from the
 bounded `params.timeout` value up to 300000 milliseconds, adds a five-second
