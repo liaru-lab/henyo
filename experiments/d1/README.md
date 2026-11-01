@@ -1,13 +1,13 @@
 # d1-2B on-device evaluation
 
-This is a standalone experiment, outside the APK and production control path. It evaluates whether native decision inference can improve a Henyo control loop while keeping observations local. The runner uses only generated English/Japanese fixtures and never sends UI events.
+This is a standalone experiment, outside the APK and production control path. It evaluates whether CPU or OpenCL GPU decision inference can improve a Henyo control loop while keeping observations local. The runner uses only generated English/Japanese fixtures and never sends UI events.
 
 ## Reproducible configuration
 
 - Runtime: [llama.cpp b11960](https://github.com/ggml-org/llama.cpp/tree/8642541b255bfb5dc39cd351a178be09013a55d6), commit `8642541b255bfb5dc39cd351a178be09013a55d6`.
 - Model: [LiquidAI/d1-2B-GGUF](https://huggingface.co/LiquidAI/d1-2B-GGUF/tree/e968f6575f0d4fad928312d7af15cad90fd365c0), revision `e968f6575f0d4fad928312d7af15cad90fd365c0`, file `d1-2B-Q4_K_M.gguf`.
 - Model file: 1,099,629,888 bytes; SHA-256 `adca5789ad30ae6027e8e936749bb9f19673097492ab26fa1c5b69643ca50b4b`.
-- Native Android arm64 CPU build with dot-product and i8mm support; OpenMP disabled. No GPU offload, image projector, or APK integration.
+- Native Android arm64 CPU backend with dot-product and i8mm support; OpenMP disabled. The GPU follow-up enables the Adreno OpenCL backend. Image projectors and APK integration are outside this evaluation.
 - Context 2048; batch and microbatch 1024; one slot; two or four CPU threads; warmup disabled; loopback-only listener with web UI disabled.
 
 The pinned runtime serves the native decision API at `/v1/systemone`, with `choice`, `noul` and `score`. All three were smoke-tested. It is not a chat-completion model. Extraction, multiple-choice multi-answer outputs and bounding-box tasks are not part of this tested runtime subset. Image/video paths were not evaluated. Read the [pinned server documentation](https://github.com/ggml-org/llama.cpp/blob/8642541b255bfb5dc39cd351a178be09013a55d6/tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api) and [model card](https://huggingface.co/LiquidAI/d1-2B) before extending the experiment. Server/GPU latency claims do not describe these Android CPU measurements.
@@ -36,9 +36,69 @@ The worker is owned by the runner, isolated from the app and bound to loopback. 
 
 No real user observations, credentials or app contents were sent to the model. A local model protects against off-device transmission by this experiment; it does not replace Android access controls or make a localhost service inaccessible to other local processes.
 
-## Device findings and decision
+## GPU follow-up: current findings
 
-**Reject this configuration as a production control fast path.** Keep deterministic rules and bounded bridge operations for known UI states. The measured local model is much slower for these decisions, and confidence gating still permits incorrect recommendations. This verdict concerns this CPU runtime, quantization, prompt and workload; it does not establish the limits of other hardware, prompts, fine-tuning or future runtimes.
+The OpenCL GPU run changes the latency conclusion: the same-device matched workload is about **9.04 times faster** than the CPU run. Keep GPU-backed d1 as an experimental candidate. Classification quality still needs work before enabling model-driven production control: the full workload retains four confident incorrect action recommendations. This worker remains outside the APK.
+
+Both matched runs used the same pinned runtime source/model, four CPU threads, one slot, fixed prompt/criteria, six English/Japanese cases and two read-only warmups. Runs were sequential with compilation finished. The CPU run explicitly selected `--device none --gpu-layers 0`; the GPU run explicitly selected the enumerated OpenCL device and requested full layer offload.
+
+| Matched workload | Measured samples | Median | Empirical p95 |
+| --- | ---: | ---: | ---: |
+| CPU | 6 | 4.499 s | 5.050 s |
+| OpenCL hardware GPU | 6 | 0.498 s | 0.560 s |
+
+These six samples are a small balanced comparison, not a reliable tail estimate. The separate GPU 48-sample workload after two warmups had median **0.491 s**, p95 **0.585 s**, with no request failures. It used the unchanged 38-distinct-state evaluation set. No external agent inference or whole-agent speedup was measured.
+
+GPU use was demonstrated by hardware OpenCL enumeration, runtime model-buffer allocation, **25/25 offloaded layers**, and a separate successful request with backend scheduling diagnostics. That request assigned 154 matrix operations and 13 convolution operations to OpenCL; two embedding/index `GET_ROWS` operations stayed on CPU. Layer-offload count alone does not mean every operation ran on GPU. Diagnostic logging was disabled for the timing runs.
+
+Compared with the prior 48-case CPU run, all **48 top-choice labels agree**, giving **39/48 correct** in both. GPU confidence values are not identical: the largest absolute confidence difference was **0.0601**, and one correct Japanese completion case fell below the preselected 0.85 gate. GPU results therefore had **27 gate-passing predictions, 23 correct**, with the same **four confident incorrect action recommendations**. Recalibrate on the intended backend; a CPU confidence threshold is not a safety guarantee on GPU. Native permissions, target validation, uniqueness and Stop remain independent requirements.
+
+First initialization with the experiment's empty OpenCL program-cache directory took **53.797 s** to readiness. Its first diagnostic request took **4.906 s**; tracing and first-use preparation make that unsuitable for a warm timing comparison. Two subsequent cached GPU starts took **7.459 s** and **6.855 s**. These are single observations, not cold-start percentile estimates. OS and driver-internal caches were uncontrolled, and model digest verification warms file cache. Model startup and program preparation are outside the measured request times. Reusing a persistent worker is necessary to amortize these costs.
+
+After the full GPU workload the process reported about **367 MiB RSS**, with **533 MiB high-water RSS**. The backend separately reported **1040.90 MiB GPU model buffers** and **126.01 MiB GPU compute buffers**, plus CPU-side model/compute/output buffers. Process RSS is not total GPU memory, and these figures must not be blindly summed on unified-memory hardware. Battery temperature samples around GPU evaluation/stress work went from **30.5 to 32.8 °C**, externally powered; the sampled system thermal status was normal. There was no joule measurement or continuous thermal/frequency trace.
+
+During a separate pending GPU warmup request, twelve measured inert Henyo taps had median/p95 **67/95 ms**, and UI Stop was acknowledged in **69 ms** including input-command overhead. Further input was rejected until Resume. The read-only wait ended later by its own timeout. This is a small responsiveness check, not a scheduling guarantee; it is separate from the clean timing comparison. The experimental model worker and Henyo control cancellation are separate paths.
+
+Sending SIGTERM to the owning runner during a pending GPU request marked the run `cancelled`, stopped/reaped its GPU child in **816 ms**, and completed owner cleanup in **909 ms**. The owner did not consume or replay a late classification. Graceful shutdown can allow in-flight GPU work to drain; callers must discard answers after cancellation. The one-second grace period and forced-termination fallback remain bounded. All evaluation workers were stopped afterwards.
+
+## Reproducing GPU execution
+
+Install `opencl-headers`, `opencl-clhpp`, `ocl-icd`, `opencl-vendor-driver`, `clinfo`, `patchelf` and LLVM tooling in Termux, then build the same pinned source with the earlier CPU build options plus `-DGGML_OPENCL=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON` in a separate GPU build directory. The measured run used source kernels, without the optional vendor precompiled-kernel library. See the [pinned OpenCL backend documentation](https://github.com/ggml-org/llama.cpp/blob/8642541b255bfb5dc39cd351a178be09013a55d6/docs/backend/OPENCL.md).
+
+Some vendor loaders dynamically open a separate implementation that is not listed among their ELF dependencies. In this environment the default loader registration enumerated zero platforms. Local copies of the loader, its separately loaded implementation and required non-system dependencies restored hardware GPU enumeration. `prepare_opencl.py` uses the local-copy/runpath approach of the [official Termux vendor-driver installer](https://github.com/termux/termux-packages/blob/master/packages/opencl-vendor-driver/postinst.sh), with explicit additional implementation files. It patches only fresh copies under ignored `artifacts/`, rejects a nonempty output directory, and leaves system/package libraries intact. Vendor binaries are never committed or redistributed.
+
+For a vendor with this layout:
+
+```sh
+python experiments/d1/prepare_opencl.py \
+  --implementation /vendor/lib64/libOpenCL_adreno.so \
+  --output artifacts/d1-local-driver
+```
+
+The implementation filename is vendor-dependent; omit or change it as appropriate. Set `LD_LIBRARY_PATH` to the resulting **absolute** local-driver directory for the following commands. Verify with `clinfo` that the selected device is hardware GPU; a CPU OpenCL device or software renderer is not a GPU measurement. Use `llama-server --list-devices` from the GPU build to obtain the exact device ID.
+
+```sh
+GPU_BUILD/bin/llama-server --list-devices
+python experiments/d1/evaluate.py --server-bin GPU_BUILD/bin/llama-server \
+  --model MODEL_FILE --threads 4 --backend opencl --device DEVICE_ID \
+  --startup-timeout 180 --request-timeout 120 --case-limit 1 \
+  --diagnostic-schedule --output artifacts/d1-gpu-diagnostic.json
+```
+
+Set `GGML_OPENCL_KERNEL_CACHE_DIR` to an ignored directory to retain the program cache. The initial diagnostic has explicitly larger bounded startup/request budgets for first-use setup. It is not included in timing statistics. The runner rejects GPU runs without an explicit device or positive runtime layer-offload evidence. Inspect the diagnostic graph assignments to identify CPU fallbacks.
+
+Run the matched six-case set twice with the **same GPU-capable binary**, first `--backend cpu`, then `--backend opencl --device DEVICE_ID`, using `--threads 4 --warmup 2` and:
+
+```sh
+--case-ids en-wait-0 en-open_result-0 en-finish-0 ja-wait-0 ja-open_result-0 ja-finish-0
+```
+
+Use distinct ignored outputs. For GPU runs allow `--startup-timeout 180`; the normal per-request budget remains 12 seconds. Omit `--case-ids` for all 48 cases. Never use diagnostic scheduling logs in timing comparisons. `--warmup` records up to four read-only warmups separately. Explicit startup/request bounds are limited to 180/120 seconds; defaults remain 20/12 seconds. SIGINT/SIGTERM records cancellation and always cleans up the owned worker.
+
+
+## Historical CPU-only findings
+
+**Historical CPU-only decision: reject the measured CPU configuration as a production control fast path.** Keep deterministic rules and bounded bridge operations for known UI states. The measured local model is much slower for these decisions, and confidence gating still permits incorrect recommendations. This verdict concerns this CPU runtime, quantization, prompt and workload; it does not establish the limits of other hardware, prompts, fine-tuning or future runtimes.
 
 The fixed workload has 48 samples (38 distinct generated states), 24 in each language. Some variants intentionally repeat the same state. Expected labels are not model inputs. The two-thread process answered every request without timeout. The workload median was **7.537 s**, p95 **9.543 s**; English median/p95 7.525/9.554 s, Japanese 7.567/9.537 s. These are a mix of prompt lengths and decisions rather than repeated timing of one prompt. An occasional UI interference check ran during the matrix; no compilation ran concurrently.
 
