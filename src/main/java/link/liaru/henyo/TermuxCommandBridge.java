@@ -56,6 +56,11 @@ final class TermuxCommandBridge {
     }
 
     static ExecutionResult execute(Context context, Request request) {
+        return execute(context, request, context::startService);
+    }
+
+    static ExecutionResult execute(Context context, Request request,
+            java.util.function.Function<Intent, ComponentName> dispatch) {
         String validation = request.validate();
         if (!validation.isEmpty()) return ExecutionResult.failure("invalid_request", validation, 0L);
         if (context.checkSelfPermission(PERMISSION_RUN_COMMAND) != PackageManager.PERMISSION_GRANTED) {
@@ -90,7 +95,7 @@ final class TermuxCommandBridge {
                     "Requested by an explicitly approved Henyo pairing token.");
             if (!request.stdin.isEmpty()) command.putExtra(EXTRA_STDIN, request.stdin);
 
-            ComponentName startedService = context.startService(command);
+            ComponentName startedService = dispatch.apply(command);
             if (startedService == null) {
                 return ExecutionResult.failure("termux_unavailable", "Termux rejected the command intent",
                         elapsed(started));

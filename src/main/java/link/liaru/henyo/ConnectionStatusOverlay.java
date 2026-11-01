@@ -73,6 +73,10 @@ final class ConnectionStatusOverlay {
     private WindowManager activityWindowManager;
     private final TargetVisualState targetVisualState = new TargetVisualState();
     private boolean connected;
+    private boolean controlStopped;
+    private Runnable stopControl;
+    private Runnable resumeControl;
+    private android.widget.Button controlButton;
     private boolean active;
     private boolean fadingOut;
     private boolean destroyed;
@@ -93,6 +97,39 @@ final class ConnectionStatusOverlay {
 
     void setConnected(boolean value) {
         mainHandler.post(() -> setConnectedOnMain(value));
+    }
+
+    void setControlActions(Runnable stop, Runnable resume) {
+        stopControl = stop;
+        resumeControl = resume;
+    }
+
+    void setControlStopped(boolean stopped) {
+        mainHandler.post(() -> {
+            controlStopped = stopped;
+            refreshControlButton();
+        });
+    }
+
+    private void refreshControlButton() {
+        if (controlButton != null) {
+            try { windowManager.removeView(controlButton); } catch (RuntimeException ignored) { }
+            controlButton = null;
+        }
+        if (destroyed || captureSuppressionDepth > 0 || (!connected && !controlStopped)
+                || windowManager == null || stopControl == null) return;
+        android.widget.Button button = new android.widget.Button(service);
+        button.setText(controlStopped ? "Resume control" : "Stop control");
+        button.setOnClickListener(v -> {
+            if (controlStopped) resumeControl.run(); else stopControl.run();
+        });
+        WindowManager.LayoutParams layout = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+        layout.gravity = Gravity.TOP | Gravity.RIGHT;
+        try { windowManager.addView(button, layout); controlButton = button; }
+        catch (RuntimeException ignored) { }
     }
 
     void noteControlActivity() {
@@ -402,6 +439,7 @@ final class ConnectionStatusOverlay {
             // screenshot API. Detach the overlay as a reliable fallback and
             // give SurfaceFlinger roughly two frames to commit its absence.
             removeView();
+            refreshControlButton();
             mainHandler.postDelayed(ready::countDown, 48L);
         });
         try {
@@ -419,6 +457,7 @@ final class ConnectionStatusOverlay {
         Runnable restore = () -> {
             if (captureSuppressionDepth > 0) captureSuppressionDepth--;
             if (captureSuppressionDepth == 0 && connected && !destroyed) ensureView();
+            refreshControlButton();
         };
         if (Looper.myLooper() == Looper.getMainLooper()) restore.run();
         else mainHandler.post(restore);
@@ -435,6 +474,7 @@ final class ConnectionStatusOverlay {
             mainHandler.removeCallbacks(finishFadeOut);
             mainHandler.removeCallbacks(mainHeartbeat);
             removeView();
+            refreshControlButton();
         });
     }
 
@@ -449,6 +489,7 @@ final class ConnectionStatusOverlay {
     private void setConnectedOnMain(boolean value) {
         if (destroyed) return;
         connected = value;
+        refreshControlButton();
         if (!connected) {
             active = false;
             fadingOut = false;

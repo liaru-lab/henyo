@@ -11,14 +11,14 @@ final class AgentActivityModel {
     static final int MAX_SUMMARY_CODE_POINTS = 72;
     static final long MESSAGE_HOLD_MS = 10_000L;
     static final long MESSAGE_FADE_OUT_MS = 1_800L;
-    static final long SPINNER_FRAME_MS = 90L;
+    static final long SPINNER_FRAME_MS = 150L;
     static final long CARET_CYCLE_MS = 1_000L;
     static final long CARET_HOLD_ON_MS = 330L;
     static final long CARET_FADE_OUT_MS = 180L;
     static final long CARET_HOLD_OFF_MS = 350L;
     static final long CARET_FADE_IN_MS = 140L;
     static final float CARET_DIM_ALPHA = 0.20f;
-    static final String[] SPINNER_FRAMES = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    static final String[] SPINNER_FRAMES = {"⠋", "⠙", "⠸", "⠴", "⠦", "⠇"};
 
     static final class Message {
         final String summary;

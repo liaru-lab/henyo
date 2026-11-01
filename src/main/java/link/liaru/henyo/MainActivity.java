@@ -49,6 +49,7 @@ public class MainActivity extends Activity {
     private final Runnable refresh = this::updateStatus;
 
     private TextView status;
+    private Button controlButton;
     private TextView excludedAppsSummary;
     private TextView pairingStatus;
     private TextView pairingCode;
@@ -81,6 +82,13 @@ public class MainActivity extends Activity {
         root.addView(intro);
         status = bodyText();
         root.addView(status);
+        controlButton = new Button(this);
+        controlButton.setOnClickListener(v -> {
+            HenyoAccessibilityService.setControlStopped(this,
+                    !HenyoAccessibilityService.isControlStopped(this));
+            updateStatus();
+        });
+        root.addView(controlButton);
 
         root.addView(sectionTitle("Targeting"));
         TextView targetingHelp = bodyText();
@@ -297,8 +305,10 @@ public class MainActivity extends Activity {
     }
 
     private void updateStatus() {
+        controlButton.setText(HenyoAccessibilityService.isControlStopped(this)
+                ? "Resume control" : "Stop control");
         RemoteAccessConfig config = RemoteAccessConfig.load(this);
-        status.setText(config.displayStatus());
+        status.setText(config.displayStatus() + "\nControl: " + HenyoAccessibilityService.controlState(this));
 
         PairingSessionManager manager = PairingSessionManager.get();
         long now = System.currentTimeMillis();
@@ -443,6 +453,7 @@ public class MainActivity extends Activity {
                     if (!new BearerTokenManager(this).revoke(record.id)) {
                         showMessage("Could not revoke " + record.name);
                     } else {
+                        HenyoAccessibilityService.clientRevoked(record.id);
                         showMessage("Client revoked: " + record.name);
                     }
                     updateStatus();
