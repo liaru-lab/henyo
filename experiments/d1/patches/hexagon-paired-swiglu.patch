@@ -1,0 +1,578 @@
+--- a/ggml/src/ggml-hexagon/ggml-hexagon.cpp
++++ b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+@@ -3080,7 +3080,7 @@
+ }
+
+ static const char * ggml_backend_hexagon_reg_get_name(ggml_backend_reg_t reg) {
+-    return "HTP";
++    return "HTPT";
+     GGML_UNUSED(reg);
+ }
+
+@@ -3516,7 +3516,7 @@
+             for (size_t i = 0; i < opt_ndev; i++) {
+                 opt_device_configs[i].physical_idx = 0;
+                 opt_device_configs[i].virtual_idx  = (int)i;
+-                opt_device_configs[i].name         = "HTP" + std::to_string(i);
++                opt_device_configs[i].name         = "HTPT" + std::to_string(i);
+                 opt_device_configs[i].mdev_group.clear();
+             }
+         } else {
+@@ -3629,7 +3629,7 @@
+                             ggml_hexagon_device_config sub_cfg;
+                             sub_cfg.physical_idx = phys_list[k];
+                             sub_cfg.virtual_idx  = virt;
+-                            sub_cfg.name         = "HTP" + std::to_string(phys_list[k]) + ":" + std::to_string(virt);
++                            sub_cfg.name         = "HTPT" + std::to_string(phys_list[k]) + ":" + std::to_string(virt);
+                             cfg.mdev_group.push_back(sub_cfg);
+                         }
+                         opt_ndev++;
+@@ -3658,8 +3658,8 @@
+                         opt_device_configs[opt_ndev].physical_idx = phys;
+                         opt_device_configs[opt_ndev].virtual_idx  = virt;
+                         opt_device_configs[opt_ndev].name         = colon_pos == std::string::npos
+-                            ? "HTP" + std::to_string(phys)
+-                            : "HTP" + std::to_string(phys) + ":" + std::to_string(virt);
++                            ? "HTPT" + std::to_string(phys)
++                            : "HTPT" + std::to_string(phys) + ":" + std::to_string(virt);
+                         opt_device_configs[opt_ndev].mdev_group.clear();
+                         opt_ndev++;
+                     } else {
+@@ -3674,7 +3674,7 @@
+         opt_ndev = 1;
+         opt_device_configs[0].physical_idx = 0;
+         opt_device_configs[0].virtual_idx  = 0;
+-        opt_device_configs[0].name         = "HTP0";
++        opt_device_configs[0].name         = "HTPT0";
+         opt_device_configs[0].mdev_group.clear();
+     }
+
+--- a/ggml/src/ggml-hexagon/htp-fusion.cpp
++++ b/ggml/src/ggml-hexagon/htp-fusion.cpp
+@@ -1,3 +1,5 @@
++#include <cstdlib>
++#include <cstdio>
+ #include "htp-fusion.h"
+ #include "htp-kparams.h"
+ #include "ggml-impl.h"
+@@ -615,9 +617,31 @@
+     }
+ }
+
++
++// Local pinned-ABI experiment, adapted from MIT-licensed Tandem commit
++// 6fed0a4555e72f23c9bfa982aa5cbec24b5ed5df. Reserved byte marks paired epilogue.
++static bool fuse_d1_swiglu(const ggml_hexagon_session *sess,htp_opnode &prev,const htp_opnode &cur){
++ const char *flag=getenv("HENYO_D1_PAIR_GLU");if(!flag||atoi(flag)!=1)return false;
++ if(prev.opcode!=HTP_OP_MUL_MAT_NX||prev.inputs.size()!=3||prev.outputs.size()!=2)return false;
++ const auto *g=cur.node->src[0],*u=cur.node->src[1],*d=cur.node;
++ if(!g||!u||ggml_get_op_params_i32(d,1)!=0||!htp_tensor_is_fuseable(g)||!htp_tensor_is_fuseable(u))return false;
++ int ig=g==prev.outputs[0]&&u==prev.outputs[1]?0:g==prev.outputs[1]&&u==prev.outputs[0]?1:-1;if(ig<0)return false;
++ auto kp=*prev.kparams<htp_mm_kernel_params>();
++ if(!kp.n_hmx||kp.kernel_type!=HTP_MM_KERNEL_HMX_2D||kp.n_weights!=2)return false;
++ auto *wg=prev.inputs[ig],*wu=prev.inputs[1-ig],*x=prev.inputs[2];
++ const char *mx=getenv("HENYO_D1_PAIR_MAX_TOKENS");if(mx&&atoi(mx)>0&&x->ne[1]>atoi(mx))return false;
++ if(wg->type!=GGML_TYPE_Q4_K||wg->ne[0]!=2048||wg->ne[1]!=7680||wu->type!=wg->type||!ggml_are_same_shape(wg,wu))return false;
++ if(x->type!=GGML_TYPE_F32||d->type!=GGML_TYPE_F32||!ggml_is_contiguous(g)||!ggml_is_contiguous(u)||!ggml_is_contiguous(d)||!ggml_are_same_shape(g,d)||!ggml_are_same_shape(u,d))return false;
++ if(htp_inputs_overlap_unsafe(prev,d))return false;
++ kp.n_chunk=kp.n_chunk/64*64;if(kp.n_chunk<64)return false;kp.unused=0xd1;
++ prev.inputs={wg,wu,x};prev.outputs={d};prev.fused.push_back(cur.node);prev.set_kparams(kp);
++ return true;
++}
++
+ bool htp_fusion_try_fuse(const struct ggml_hexagon_session * sess, struct htp_opnode & prev, const struct htp_opnode & cur) {
+     if (!opt_opfusion) return false;
+
++    if(cur.opcode==HTP_OP_GLU_SWIGLU && fuse_d1_swiglu(sess,prev,cur))return true;
+     switch (cur.opcode) {
+         case HTP_OP_ADD:
+             return (htp_fusion_enabled(HTP_FUSE_ALLREDUCE_ADD) && fuse_allreduce_add(sess, prev, cur)) ||
+--- a/ggml/src/ggml-hexagon/htp-kparams.cpp
++++ b/ggml/src/ggml-hexagon/htp-kparams.cpp
+@@ -711,6 +711,22 @@
+         }
+     }
+
++    // Local d1 shape tuning, retaining the exact original fallback and VTCM bound.
++    const char *m_env=getenv("HENYO_D1_HMX_M"),*n_env=getenv("HENYO_D1_HMX_N"),*scope=getenv("HENYO_D1_HMX_SCOPE");
++    if((m_env||n_env)&&(!scope||(!strcmp(scope,"down")?ne00_padded==7680:!strcmp(scope,"gate")?ne00_padded==2048:true))&&!use_grouped&&!is_matmul_id&&!is_batched&&ne11>=256&&((ne00_padded==2048&&ne01_padded==7680)||(ne00_padded==7680&&ne01_padded==2048))) {
++        size_t requested_m=m_env?atoi(m_env):m_chunk,requested_n=n_env?(!strcmp(n_env,"adaptive")?(ne11<512?32:96):atoi(n_env)):n_chunk;
++        if(m_env&&atoi(m_env)==0&&requested_n&&requested_n%32==0) {
++            for(size_t candidate=32;candidate<=(size_t)m_for_solver_padded;candidate+=32) {
++                size_t used=htp_mm_hmx_get_2d_vtcm_size(wtype,ne00_padded,candidate,requested_n,pipeline,act_threads_selected,aligned_tile_size,src2_size);
++                if(used<=vtcm_budget)requested_m=candidate;
++            }
++        }
++        if(requested_m&&requested_n&&requested_m%32==0&&requested_n%32==0) {
++            size_t used=htp_mm_hmx_get_2d_vtcm_size(wtype,ne00_padded,requested_m,requested_n,pipeline,act_threads_selected,aligned_tile_size,src2_size);
++            if(used<=vtcm_budget) { m_chunk=requested_m;n_chunk=requested_n;vtcm_size=used; }
++        }
++
++    }
+     kparams->n_hmx              = 1;
+     kparams->pipeline           = pipeline ? 1 : 0;
+     kparams->m_chunk            = m_chunk;
+--- a/ggml/src/ggml-hexagon/htp/matmul-ops.c
++++ b/ggml/src/ggml-hexagon/htp/matmul-ops.c
+@@ -1,3 +1,4 @@
++#include "hvx-sigmoid.h"
+ #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
+ #pragma clang diagnostic ignored "-Wunused-function"
+ #pragma clang diagnostic ignored "-Wunused-variable"
+@@ -2480,6 +2481,166 @@
+     }
+ }
+
++// Paired epilogue adapted from MIT-licensed flyingdoog/tandem,
++// commit 6fed0a4555e72f23c9bfa982aa5cbec24b5ed5df.
++// --- MUL_MAT_NX + SWIGLU epilogue ---
++
++// silu(g) * u with the instructions of the SWIGLU op (act-ops.c swiglu_f32: hvx_sigmoid_f32_aa, then hvx_mul_mul_f32_aa)
++static inline HVX_Vector hmx_nx_swiglu_vec_f32(HVX_Vector g, HVX_Vector u, HVX_Vector one, HVX_Vector max_exp, HVX_Vector min_exp) {
++    const HVX_Vector s = hvx_vec_fast_sigmoid_f32_guard(g, one, max_exp, min_exp);
++#if __HVX_ARCH__ < 79
++    const HVX_Vector gs = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf(g, s));
++    return Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf(gs, u));
++#else
++    return Q6_Vsf_vmpy_VsfVsf(Q6_Vsf_vmpy_VsfVsf(g, s), u);
++#endif
++}
++
++// rows r_idx and r_idx + 1 (r_idx even) of one column block: y0 / y1 = silu(gate) * up
++static inline void hmx_nx_swiglu_row_pair(const __fp16 * restrict gate, const __fp16 * restrict up, uint32_t r_idx,
++                                          size_t tile_row_stride, size_t c_off, HVX_Vector one_f16, HVX_Vector one,
++                                          HVX_Vector max_exp, HVX_Vector min_exp, HVX_Vector * y0, HVX_Vector * y1) {
++    const size_t   t_off = (r_idx / HTP_MM_HMX_TILE_N_ROWS) * tile_row_stride + c_off;
++    const uint32_t r1    = (r_idx % HTP_MM_HMX_TILE_N_ROWS) / 2;  // row pair within the tile
++
++    const HVX_VectorPair vg = Q6_Wqf32_vmpy_VhfVhf(((const HVX_Vector *) (gate + t_off))[r1], one_f16);
++    const HVX_VectorPair vu = Q6_Wqf32_vmpy_VhfVhf(((const HVX_Vector *) (up + t_off))[r1], one_f16);
++
++    *y0 = hmx_nx_swiglu_vec_f32(Q6_Vsf_equals_Vqf32(Q6_V_lo_W(vg)), Q6_Vsf_equals_Vqf32(Q6_V_lo_W(vu)), one, max_exp, min_exp);
++    *y1 = hmx_nx_swiglu_vec_f32(Q6_Vsf_equals_Vqf32(Q6_V_hi_W(vg)), Q6_Vsf_equals_Vqf32(Q6_V_hi_W(vu)), one, max_exp, min_exp);
++}
++
++// dst = silu(gate) * up for n_rows x c_len of an fp16 HMX output chunk. gate / up point at the tiles of the first
++// column block of row tile 0. The fp16 -> f32 step is the one of transfer_output_chunk_fp16_to_fp32_col_chunk.
++static void transfer_output_chunk_swiglu(float * restrict dst, const __fp16 * restrict gate, const __fp16 * restrict up,
++                                         uint32_t start_row, uint32_t n_rows, uint32_t c_len, size_t tile_row_stride,
++                                         uint32_t dst_stride, uint32_t dst_cols) {
++    const HVX_Vector one_f16 = hvx_vec_splat_f16(1.0);
++    const HVX_Vector one     = hvx_vec_splat_f32(1.f);
++    const HVX_Vector max_exp = hvx_vec_splat_f32(87.f);
++    const HVX_Vector min_exp = hvx_vec_splat_f32(-87.f);
++
++    const uint32_t limit_c = hex_smin(c_len, dst_cols);
++    const uint32_t n_pairs = n_rows / 2;
++
++    for (uint32_t c = 0; c < limit_c; c += HTP_MM_HMX_TILE_N_COLS) {
++        const uint32_t valid_c = hex_smin(limit_c - c, HTP_MM_HMX_TILE_N_COLS);
++        const size_t   c_off   = (c / HTP_MM_HMX_TILE_N_COLS) * HTP_MM_HMX_TILE_N_ELMS;
++        float *        out     = dst + c;
++
++        HVX_Vector y0, y1;
++        if (valid_c == HTP_MM_HMX_TILE_N_COLS) {
++            for (uint32_t p = 0; p < n_pairs; p++, out += 2 * dst_stride) {
++                hmx_nx_swiglu_row_pair(gate, up, start_row + 2 * p, tile_row_stride, c_off, one_f16, one, max_exp, min_exp, &y0, &y1);
++                hvx_vmemu(out)              = y0;
++                hvx_vmemu(out + dst_stride) = y1;
++            }
++            if (n_rows & 1) {
++                hmx_nx_swiglu_row_pair(gate, up, start_row + 2 * n_pairs, tile_row_stride, c_off, one_f16, one, max_exp, min_exp, &y0, &y1);
++                hvx_vmemu(out) = y0;
++            }
++        } else {
++            for (uint32_t p = 0; p < n_pairs; p++, out += 2 * dst_stride) {
++                hmx_nx_swiglu_row_pair(gate, up, start_row + 2 * p, tile_row_stride, c_off, one_f16, one, max_exp, min_exp, &y0, &y1);
++                hvx_vec_store_u(out, valid_c * sizeof(float), y0);
++                hvx_vec_store_u(out + dst_stride, valid_c * sizeof(float), y1);
++            }
++            if (n_rows & 1) {
++                hmx_nx_swiglu_row_pair(gate, up, start_row + 2 * n_pairs, tile_row_stride, c_off, one_f16, one, max_exp, min_exp, &y0, &y1);
++                hvx_vec_store_u(out, valid_c * sizeof(float), y0);
++            }
++        }
++    }
++}
++
++typedef struct {
++    struct htp_thread_trace * traces;
++    float                   * dst;
++    const __fp16            * gate;             // gate tiles: column tiles [0, n_cols / 32) of each row tile
++    const __fp16            * up;               // up tiles: column tiles [n_cols / 32, 2 * n_cols / 32)
++    size_t                    tile_row_stride;  // elements per row tile (both halves)
++    uint32_t                  n_rows;
++    uint32_t                  n_cols;           // columns per weight in this chunk
++    uint32_t                  dst_stride;
++    uint32_t                  dst_cols;
++    uint32_t                  col_split;        // 1: threads split column blocks, 0: threads split row pairs
++    uint32_t                  n_rows_per_task;
++    struct fastdiv_values     n_threads_div;
++} output_swiglu_state_t;
++
++static void transfer_output_chunk_swiglu_worker_fn(unsigned int n, unsigned int i, void * data) {
++    const output_swiglu_state_t * st = (const output_swiglu_state_t *) data;
++    struct htp_thread_trace * tr = &st->traces[i];
++
++    if (st->col_split) {
++        const uint32_t n_blocks = st->n_cols / HTP_MM_HMX_TILE_N_COLS;
++        const uint32_t b_first  = fastdiv(n_blocks * i, &st->n_threads_div);
++        const uint32_t b_last   = fastdiv(n_blocks * (i + 1), &st->n_threads_div);
++        const uint32_t c_first  = b_first * HTP_MM_HMX_TILE_N_COLS;
++        const uint32_t c_len    = (b_last - b_first) * HTP_MM_HMX_TILE_N_COLS;
++
++        if (c_len == 0 || c_first >= st->dst_cols) return;
++
++        htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_O_PROC, c_first);
++        transfer_output_chunk_swiglu(st->dst + c_first, st->gate + b_first * HTP_MM_HMX_TILE_N_ELMS, st->up + b_first * HTP_MM_HMX_TILE_N_ELMS,
++                                     0, st->n_rows, c_len, st->tile_row_stride, st->dst_stride, st->dst_cols - c_first);
++        htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_O_PROC, c_first);
++    } else {
++        const uint32_t r_first = i * st->n_rows_per_task;
++        if (r_first >= st->n_rows) return;
++
++        const uint32_t n_rows = hex_smin(st->n_rows - r_first, st->n_rows_per_task);
++
++        htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_O_PROC, r_first);
++        transfer_output_chunk_swiglu(st->dst + (size_t) r_first * st->dst_stride, st->gate, st->up,
++                                     r_first, n_rows, st->n_cols, st->tile_row_stride, st->dst_stride, st->dst_cols);
++        htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_O_PROC, r_first);
++    }
++
++    (void) n;
++}
++
++// vtcm_src: fp16 output of one HMX job with 2 * n_cols columns (gate tiles, then up tiles)
++static void transfer_output_chunk_swiglu_threaded(struct htp_context * ctx, float * dst, const __fp16 * vtcm_src, uint32_t n_rows,
++                                                  uint32_t n_cols, uint32_t dst_stride, uint32_t dst_cols, uint32_t n_threads) {
++    assert(n_cols % HTP_MM_HMX_TILE_N_COLS == 0);
++
++    if (n_rows == 0) return;
++
++    const uint32_t n_blocks = n_cols / HTP_MM_HMX_TILE_N_COLS;
++
++    output_swiglu_state_t st;
++    st.traces          = ctx->trace;
++    st.dst             = dst;
++    st.gate            = vtcm_src;
++    st.up              = vtcm_src + (size_t) n_blocks * HTP_MM_HMX_TILE_N_ELMS;
++    st.tile_row_stride = (size_t) 2 * n_blocks * HTP_MM_HMX_TILE_N_ELMS;
++    st.n_rows          = n_rows;
++    st.n_cols          = n_cols;
++    st.dst_stride      = dst_stride;
++    st.dst_cols        = dst_cols;
++
++    uint32_t n_tasks;
++    if (n_threads > 1 && n_blocks >= n_threads) {
++        st.col_split       = 1;
++        st.n_rows_per_task = n_rows;
++        st.n_threads_div   = (n_threads == ctx->n_threads) ? ctx->n_threads_div : init_fastdiv_values(n_threads);
++        n_tasks            = n_threads;
++    } else {
++        st.col_split       = 0;
++        st.n_rows_per_task = (n_threads <= 1) ? n_rows : hex_align_up(hmx_ceil_div(n_rows, n_threads), 2);
++        st.n_threads_div   = ctx->n_threads_div;
++        n_tasks            = hmx_ceil_div(n_rows, st.n_rows_per_task);
++    }
++
++    if (n_tasks <= 1) {
++        transfer_output_chunk_swiglu_worker_fn(1, 0, &st);
++    } else {
++        worker_pool_run_func(ctx->worker_pool, transfer_output_chunk_swiglu_worker_fn, &st, n_tasks);
++    }
++}
++
++
+ struct activation_transfer_params {
+     struct htp_context *          ctx;
+     __fp16 *                      dst;
+@@ -2904,6 +3065,280 @@
+
+     return 0;
+ }
++
++static inline void hmx_nx_swiglu_push_weights(dma_queue * q, uint8_t * raw, dma_addr_t w_gate, dma_addr_t w_up,
++                                              size_t stride_gate, size_t stride_up, size_t nc, size_t n_cols,
++                                              bool is_quant, int n_k_tiles, uint32_t dst_stride,
++                                              uint32_t src_stride_gate, uint32_t src_stride_up, uint32_t width) {
++    const uint32_t height = is_quant ? (n_cols / 32) * n_k_tiles : n_cols;
++    dma_queue_push(q, dma_make_data(raw, w_gate + nc * stride_gate), dst_stride, src_stride_gate, width, height);
++    dma_queue_push(q, dma_make_data(raw + (size_t) height * dst_stride, w_up + nc * stride_up), dst_stride, src_stride_up, width, height);
++}
++
++// MUL_MAT_NX + SWIGLU on HMX: dst = silu(W_gate x) * (W_up x), src[0] = W_gate, src[1] = W_up, src[2] = x.
++// Same loops as hmx_mm_nx_2d_f32, but the weight loop is folded into the column loop: each HMX job computes the same
++// nc_w columns of both weights (gate tiles, then up tiles), so the epilogue has both results in VTCM and writes only
++// the product. Activation tiles, weight tiles, HMX dot products and the fp16 -> f32 step are the ones of the unfused
++// kernel, and the epilogue repeats the SWIGLU op math, so the result is bit-identical to MUL_MAT_NX + SWIGLU.
++static int hmx_mm_nx_swiglu_2d_f32(struct htp_ops_context * octx, const struct htp_mm_kernel_params * kparams) {
++    struct htp_context * ctx = octx->ctx;
++    struct htp_thread_trace * tr = &ctx->trace[0];
++    htp_trace_event_start(tr, HTP_TRACE_EVT_INIT, 0);
++
++    const struct htp_tensor * restrict w_gate = octx->src[0];
++    const struct htp_tensor * restrict w_up   = octx->src[1];
++    const struct htp_tensor * restrict act    = octx->src[2];
++    const struct htp_tensor * restrict dst    = octx->dsts[0];
++
++    if (kparams->n_weights != 2 || !w_gate || !w_up || !act || !dst) {
++        return HTP_STATUS_INVAL_PARAMS;
++    }
++    if (w_gate->type != w_up->type || w_gate->ne[0] != w_up->ne[0] || w_gate->ne[1] != w_up->ne[1]) {
++        return HTP_STATUS_INVAL_PARAMS;
++    }
++
++    const int weight_type = (int) w_gate->type;
++    const int k           = (int) act->ne[0];
++    const int k_valid     = (int) act->ne[0];
++    const int m           = (int) (act->ne[1] * act->ne[2] * act->ne[3]);
++    const int act_stride  = (int) (act->nb[1] / sizeof(float));
++    const dma_addr_t act_dma_addr = act->data;
++
++    if (k % 32 != 0) { return HTP_STATUS_NO_SUPPORT; }
++    if ((act_dma_addr & (VLEN - 1)) != 0) { return HTP_STATUS_NO_SUPPORT; }
++    if ((int) (dst->ne[1] * dst->ne[2] * dst->ne[3]) != m || dst->ne[0] > w_gate->ne[1]) {
++        return HTP_STATUS_INVAL_PARAMS;
++    }
++
++    size_t row_stride=htp_tensor_get_row_size(weight_type,k);
++    if(!row_stride)return HTP_STATUS_NO_SUPPORT;
++    tiled_dequant_task_fn_t dequant_worker_fn=hmx_get_dequant_worker_fn(weight_type,true);
++    if(!dequant_worker_fn)return HTP_STATUS_NO_SUPPORT;
++    const int n_k_tiles = k / HTP_MM_HMX_TILE_N_COLS;
++    const struct fastdiv_values n_k_tiles_div = init_fastdiv_values(n_k_tiles);
++
++    const bool is_quant = true;
++    const size_t vtcm_budget  = ctx->vtcm_size;
++
++    const int m_chunk_n_rows  = kparams->m_chunk;
++    const int n_chunk_n_cols  = kparams->n_chunk;             // columns of one HMX job (both weights)
++    const int nc_w            = (n_chunk_n_cols / 64) * 32;   // columns per weight in one HMX job
++    const int pipeline        = kparams->pipeline;
++    const int n_threads       = octx->n_threads;
++    const int act_threads     = kparams->n_act_threads;
++    const struct fastdiv_values * act_threads_div = &kparams->div_n_act_threads;
++    const struct fastdiv_values * k_div           = &kparams->div_ne00_padded;
++    const int tile_size       = kparams->tile_size;
++    const int aligned_tile_size = kparams->aligned_tile_size;
++
++    if (nc_w == 0 || m_chunk_n_rows <= 0) {
++        return HTP_STATUS_INVAL_PARAMS;
++    }
++
++    const uint32_t dma_dst_stride       = is_quant ? aligned_tile_size : row_stride;
++    const uint32_t dma_width_bytes      = is_quant ? tile_size : row_stride;
++    const uint32_t dma_src_stride_gate  = is_quant ? tile_size : w_gate->nb[1];
++    const uint32_t dma_src_stride_up    = is_quant ? tile_size : w_up->nb[1];
++
++    struct htp_mm_hmx_vtcm_layout L;
++    htp_mm_hmx_vtcm_layout_build(&L, HTP_MM_KERNEL_HMX_2D, weight_type, k, m_chunk_n_rows, n_chunk_n_cols, 1, pipeline, act_threads, aligned_tile_size, 0);
++
++    if (L.total_bytes > vtcm_budget) {
++        FARF(ERROR, "hmx-mm-nx-swiglu-2d: VTCM overflow: used %zu budget %zu, m %d k %d mc %d nc %d",
++             L.total_bytes, vtcm_budget, m, k, m_chunk_n_rows, n_chunk_n_cols);
++        return HTP_STATUS_VTCM_TOO_SMALL;
++    }
++
++    uint8_t * const base = (uint8_t *) ctx->vtcm_base;
++    uint8_t *vtcm_weight_raw[2] = {
++        VTCM_LAYOUT_PTR(uint8_t, base, L.off_weight[0]),
++        VTCM_LAYOUT_PTR_OPTIONAL(uint8_t, base, L.off_weight[1], pipeline)
++    };
++
++    __fp16  *vtcm_f16_act    = VTCM_LAYOUT_PTR(__fp16, base, L.off_act);
++    float   *vtcm_f32_act    = VTCM_LAYOUT_PTR(float, base, L.off_act_f32);
++    __fp16  *vtcm_output     = VTCM_LAYOUT_PTR(__fp16, base, L.off_dst[0]);
++    void    *vtcm_scratch0   = VTCM_LAYOUT_PTR(void, base, L.off_scratch[0]);
++    void    *vtcm_scratch1   = VTCM_LAYOUT_PTR_OPTIONAL(void, base, L.off_scratch[1], pipeline);
++    void    *vtcm_scratch2   = VTCM_LAYOUT_PTR_OPTIONAL(void, base, L.off_dst[1], pipeline);
++    __fp16  *vtcm_scales     = VTCM_LAYOUT_PTR(__fp16, base, L.off_scales);
++
++    hmx_init_column_scales(vtcm_scales, Q6_V_vsplat_R(0x3c00));  // scale: 1.0, bias: 0.0 in FP16
++
++    int m_start = 0;
++    int m_rows  = m;
++    if (octx->ctx->mdev.count > 1) {
++        const bool can_split = htp_tensor_can_row_partition(dst, sizeof(float));
++        const struct htp_tensor_mdev_range range = htp_tensor_mdev_partition((uint32_t) m, can_split ? 1 : 0, octx->ctx->mdev.idx, octx->ctx->mdev.count, &octx->ctx->mdev.count_div);
++        m_start = (int) range.start;
++        m_rows  = (int) range.count;
++    }
++
++    const size_t n = w_gate->ne[1];  // padded rows of each weight = columns of the gate / up results
++
++    if (m_rows == 0 || n == 0) {
++        return HTP_STATUS_OK;
++    }
++
++    const dma_addr_t wg          = w_gate->data;
++    const dma_addr_t wu          = w_up->data;
++    const size_t     stride_g    = w_gate->nb[1];
++    const size_t     stride_u    = w_up->nb[1];
++    float *          dst_ptr     = (float *) dst->data;
++    const size_t     dst_stride  = dst->nb[1] / sizeof(float);
++    const int        dst_cols    = (int) dst->ne[0];
++    const int        n_chunk_cnt = hmx_ceil_div(n, nc_w);
++    dma_queue *      weight_dma  = ctx->dma[0];
++
++    FARF(HIGH, "hmx-mm-nx-swiglu-2d: m %d (%d..%d) k %d n %zu wtype %d mc %d nc %d (%d per weight) vtcm %zu/%zu",
++         m, m_start, m_start + m_rows, k, n, weight_type, m_chunk_n_rows, n_chunk_n_cols, nc_w, L.total_bytes, vtcm_budget);
++
++    htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
++
++    const size_t mr_end = (size_t)(m_start + m_rows);
++
++    if (pipeline) {
++        hmx_matmul_job_t job_slots[2];
++
++        void *vtcm_weight_bufs[2] = { vtcm_scratch0, vtcm_scratch1 };
++        void *vtcm_output_bufs[2] = { vtcm_output,   vtcm_scratch2 };
++
++        for (size_t mr = (size_t) m_start; mr < mr_end; mr += m_chunk_n_rows) {
++            const size_t n_rows = hex_smin(mr_end - mr, m_chunk_n_rows);
++
++            struct activation_transfer_params act_params = {
++                .ctx = ctx,
++                .dst = vtcm_f16_act,
++                .act_dma_addr = act_dma_addr + mr * act_stride * sizeof(float),
++                .n_rows = (int) n_rows,
++                .k_block = k,
++                .k_stride = act_stride,
++                .n_threads = act_threads,
++                .act_threads_div = act_threads_div,
++                .k_div = k_div,
++                .k_valid = k_valid,
++                .vtcm_f32_act = vtcm_f32_act,
++                .vtcm_f32_act_bytes = L.act_f32_bytes,
++                .act_elem_size = sizeof(float),
++            };
++            transfer_activation_chunk_threaded(&act_params);
++
++            // Prologue: push A0 and A1 (gate + up halves each)
++            hmx_nx_swiglu_push_weights(weight_dma, vtcm_weight_raw[0], wg, wu, stride_g, stride_u, 0, hex_smin(n, nc_w),
++                                       is_quant, n_k_tiles, dma_dst_stride, dma_src_stride_gate, dma_src_stride_up, dma_width_bytes);
++            if (1 < n_chunk_cnt) {
++                hmx_nx_swiglu_push_weights(weight_dma, vtcm_weight_raw[1], wg, wu, stride_g, stride_u, nc_w, hex_smin(n - nc_w, nc_w),
++                                           is_quant, n_k_tiles, dma_dst_stride, dma_src_stride_gate, dma_src_stride_up, dma_width_bytes);
++            }
++
++            // Main loop: pop A_i -> dequantize A_i -> push A_{i+2} -> submit C_i -> wait C_{i-1} and store silu(gate) * up
++            for (int i = 0; i < n_chunk_cnt; ++i) {
++                const size_t nc     = (size_t) i * nc_w;
++                const size_t n_cols = hex_smin(n - nc, nc_w);
++
++                uint8_t * curr_raw = (uint8_t *) dma_queue_pop(weight_dma).dst;  // gate half
++                dma_queue_pop(weight_dma);                                        // up half
++
++                dequantize_tiled_weight_chunk_to_fp16_tiles(
++                    ctx, vtcm_weight_bufs[i % 2], curr_raw,
++                    2 * n_cols, k, row_stride, weight_type,
++                    n_k_tiles, n_k_tiles_div, dequant_worker_fn, n_threads);
++
++                if (i + 2 < n_chunk_cnt) {
++                    const size_t nc_p2 = nc + 2 * (size_t) nc_w;
++                    hmx_nx_swiglu_push_weights(weight_dma, curr_raw, wg, wu, stride_g, stride_u, nc_p2, hex_smin(n - nc_p2, nc_w),
++                                               is_quant, n_k_tiles, dma_dst_stride, dma_src_stride_gate, dma_src_stride_up, dma_width_bytes);
++                }
++
++                hmx_matmul_job_init(&job_slots[i % 2], (__fp16 *) vtcm_output_bufs[i % 2],
++                                    (__fp16 *) vtcm_f16_act, (__fp16 *) vtcm_weight_bufs[i % 2],
++                                    vtcm_scales, hmx_ceil_div(n_rows, HTP_MM_HMX_TILE_N_ROWS),
++                                    hmx_ceil_div(2 * n_cols, HTP_MM_HMX_TILE_N_COLS), k / HTP_MM_HMX_TILE_N_ROWS);
++                hmx_queue_push(ctx->hmx_queue, hmx_queue_make_desc(hmx_matmul_worker_fn, &job_slots[i % 2]));
++
++                if (i > 0) {
++                    hmx_queue_pop(ctx->hmx_queue);
++                    const size_t nc_prev     = (size_t) (i - 1) * nc_w;
++                    const size_t n_cols_prev = hex_smin(n - nc_prev, nc_w);
++                    const int chunk_dst_cols = dst_cols - (int) nc_prev;
++                    if (chunk_dst_cols > 0) {
++                        transfer_output_chunk_swiglu_threaded(ctx, dst_ptr + (mr * dst_stride + nc_prev), (const __fp16 *) vtcm_output_bufs[(i - 1) % 2],
++                                                              n_rows, n_cols_prev, dst_stride, chunk_dst_cols, n_threads);
++                    }
++                }
++            }
++
++            // Epilogue: wait C_{last} and store it
++            hmx_queue_pop(ctx->hmx_queue);
++            const size_t nc_last     = (size_t) (n_chunk_cnt - 1) * nc_w;
++            const size_t n_cols_last = hex_smin(n - nc_last, nc_w);
++            const int chunk_dst_cols = dst_cols - (int) nc_last;
++            if (chunk_dst_cols > 0) {
++                transfer_output_chunk_swiglu_threaded(ctx, dst_ptr + (mr * dst_stride + nc_last), (const __fp16 *) vtcm_output_bufs[(n_chunk_cnt - 1) % 2],
++                                                      n_rows, n_cols_last, dst_stride, chunk_dst_cols, n_threads);
++            }
++        }
++    } else {
++        hmx_matmul_job_t job;
++        for (size_t mr = (size_t) m_start; mr < mr_end; mr += m_chunk_n_rows) {
++            const size_t n_rows = hex_smin(mr_end - mr, m_chunk_n_rows);
++
++            struct activation_transfer_params act_params = {
++                .ctx = ctx,
++                .dst = vtcm_f16_act,
++                .act_dma_addr = act_dma_addr + mr * act_stride * sizeof(float),
++                .n_rows = (int) n_rows,
++                .k_block = k,
++                .k_stride = act_stride,
++                .n_threads = act_threads,
++                .act_threads_div = act_threads_div,
++                .k_div = k_div,
++                .k_valid = k_valid,
++                .vtcm_f32_act = vtcm_f32_act,
++                .vtcm_f32_act_bytes = L.act_f32_bytes,
++                .act_elem_size = sizeof(float),
++            };
++            transfer_activation_chunk_threaded(&act_params);
++
++            hmx_nx_swiglu_push_weights(weight_dma, vtcm_weight_raw[0], wg, wu, stride_g, stride_u, 0, hex_smin(n, nc_w),
++                                       is_quant, n_k_tiles, dma_dst_stride, dma_src_stride_gate, dma_src_stride_up, dma_width_bytes);
++
++            for (int i = 0; i < n_chunk_cnt; ++i) {
++                const size_t nc     = (size_t) i * nc_w;
++                const size_t n_cols = hex_smin(n - nc, nc_w);
++
++                uint8_t * curr_raw = (uint8_t *) dma_queue_pop(weight_dma).dst;  // gate half
++                dma_queue_pop(weight_dma);                                        // up half
++
++                dequantize_tiled_weight_chunk_to_fp16_tiles(
++                    ctx, vtcm_scratch0, curr_raw,
++                    2 * n_cols, k, row_stride, weight_type,
++                    n_k_tiles, n_k_tiles_div, dequant_worker_fn, n_threads);
++
++                if (i + 1 < n_chunk_cnt) {
++                    const size_t nc_next = nc + nc_w;
++                    hmx_nx_swiglu_push_weights(weight_dma, curr_raw, wg, wu, stride_g, stride_u, nc_next, hex_smin(n - nc_next, nc_w),
++                                               is_quant, n_k_tiles, dma_dst_stride, dma_src_stride_gate, dma_src_stride_up, dma_width_bytes);
++                }
++
++                hmx_matmul_job_init(&job, vtcm_output, vtcm_f16_act, (__fp16 *) vtcm_scratch0, vtcm_scales,
++                                    hmx_ceil_div(n_rows, HTP_MM_HMX_TILE_N_ROWS), hmx_ceil_div(2 * n_cols, HTP_MM_HMX_TILE_N_COLS),
++                                    k / HTP_MM_HMX_TILE_N_ROWS);
++                hmx_queue_push(ctx->hmx_queue, hmx_queue_make_desc(hmx_matmul_worker_fn, &job));
++                hmx_queue_pop(ctx->hmx_queue);
++
++                const int chunk_dst_cols = dst_cols - (int) nc;
++                if (chunk_dst_cols > 0) {
++                    transfer_output_chunk_swiglu_threaded(ctx, dst_ptr + (mr * dst_stride + nc), vtcm_output,
++                                                          n_rows, n_cols, dst_stride, chunk_dst_cols, n_threads);
++                }
++            }
++        }
++    }
++
++    return HTP_STATUS_OK;
++}
++
+
+ static int hmx_mm_nx_2d_f32(struct htp_ops_context * octx, const struct htp_mm_kernel_params * kparams) {
+     struct htp_context * ctx = octx->ctx;
+@@ -4499,7 +4934,7 @@
+     }
+
+     if (kparams->n_hmx) {
+-        return hmx_mm_nx_2d_f32(octx, kparams);
++        return kparams->unused == 0xd1 ? hmx_mm_nx_swiglu_2d_f32(octx, kparams) : hmx_mm_nx_2d_f32(octx, kparams);
+     }
+
+     struct htp_thread_trace * tr = &octx->ctx->trace[0];
