@@ -102,6 +102,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final ThreadLocal<String> requestTargetContextId = new ThreadLocal<>();
     private final ThreadLocal<Long> requestControlTicket = new ThreadLocal<>();
     private final ThreadLocal<OperationDeadline> requestDeadline = new ThreadLocal<>();
+    private final ThreadLocal<Runnable> requestVisualCue = new ThreadLocal<>();
     private final ThreadLocal<String> requestTaskId = new ThreadLocal<>();
     private final TaskLifecycle taskLifecycle = new TaskLifecycle();
     private final ThreadLocal<Boolean> requestMutationAccepted = ThreadLocal.withInitial(() -> false);
@@ -406,7 +407,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private <T> T controlledDispatch(java.util.function.Supplier<T> action) {
         checkControl();
-        return controlOwnership.dispatch(requestControlTicket.get(), currentTargetContextId(), () -> {
+        T dispatched = controlOwnership.dispatch(requestControlTicket.get(), currentTargetContextId(), () -> {
             checkDeadline();
             T result;
             try { result = action.get(); }
@@ -418,6 +419,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
             if (Boolean.TRUE.equals(result) || result instanceof ComponentName) requestMutationAccepted.set(true);
             return result;
         });
+        if (Boolean.TRUE.equals(dispatched) || dispatched instanceof ComponentName) {
+            Runnable cue = requestVisualCue.get(); requestVisualCue.remove();
+            if (cue != null) cue.run();
+        }
+        return dispatched;
     }
 
     private String failureOutcome(String outcome) {
@@ -662,6 +668,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                     requestDeadline.remove();
                     requestTaskId.remove();
                     requestMutationAccepted.remove();
+                    requestVisualCue.remove();
                 }
             }
             byte[] responseBody = response.body;
@@ -845,7 +852,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         }
                         requestControlTicket.set(controlOwnership.ticket());
                         try {
+                            long queuedAt = System.nanoTime();
                             synchronized (controlExecutionLock) {
+                                performanceMetrics.phases.record(PhaseTimings.Phase.REQUEST_QUEUE, System.nanoTime() - queuedAt);
                                 executeWsBatch(session, id, frame.text);
                             }
                         } catch (OperationFailure e) {
@@ -871,7 +880,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         requestDeadline.set(deadline);
                         requestControlTicket.set(controlOwnership.ticket());
                         try {
+                            long queuedAt = System.nanoTime();
                             synchronized (controlExecutionLock) {
+                                performanceMetrics.phases.record(PhaseTimings.Phase.REQUEST_QUEUE, System.nanoTime() - queuedAt);
                                 result = executeWsCall(session, id, message.get("op"), frame.text);
                             }
                         } finally {
@@ -928,6 +939,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             if (parentDeadline == null) requestDeadline.remove(); else requestDeadline.set(parentDeadline);
             if (parentTaskId == null) requestTaskId.remove(); else requestTaskId.set(parentTaskId);
             requestMutationAccepted.set(parentMutation);
+            requestVisualCue.remove();
             requestTargetContextId.remove();
             requestBearerToken.remove();
         }
@@ -1822,10 +1834,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private Response serializedControl(ControlResponse operation) {
         boolean outerControlCall = !Thread.holdsLock(controlExecutionLock);
+        long queuedAt = System.nanoTime();
         synchronized (controlExecutionLock) {
-            checkControl();
-            if (outerControlCall) noteControlActivity("");
-            return operation.run();
+            if (outerControlCall) performanceMetrics.phases.record(PhaseTimings.Phase.REQUEST_QUEUE, System.nanoTime() - queuedAt);
+            try {
+                checkControl();
+                if (outerControlCall) noteControlActivity("");
+                return operation.run();
+            } finally { if (outerControlCall) requestVisualCue.remove(); }
         }
     }
 
@@ -2174,6 +2190,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private TargetSnapshot resolveTarget(OperationTargetConstraint constraint, boolean remember) {
+        long started = System.nanoTime();
+        try { return resolveTargetMeasured(constraint, remember); }
+        finally { performanceMetrics.phases.record(PhaseTimings.Phase.TARGET_RESOLUTION, System.nanoTime() - started); }
+    }
+
+    private TargetSnapshot resolveTargetMeasured(OperationTargetConstraint constraint, boolean remember) {
         List<AccessibilityWindowInfo> windows = allWindows();
         if (windows.isEmpty()) return null;
         long now = SystemClock.elapsedRealtime();
@@ -2431,6 +2453,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         TargetSnapshot target = resolveTarget(constraint, true);
         if (target == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
         AccessibilityNodeInfo root = target.root;
+        long traversalStarted = System.nanoTime();
         try {
             boolean redact = boolParam(params, "redact", false);
             boolean onlyTextNodes = boolParam(params, "onlyTextNodes", false);
@@ -2449,6 +2472,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             }
             return json(200, sb.toString());
         } finally {
+            performanceMetrics.phases.record(PhaseTimings.Phase.UI_TRAVERSAL, System.nanoTime() - traversalStarted);
             root.recycle();
         }
     }
@@ -2601,12 +2625,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
         CoordinateResolution end = resolveControlPoint(params, x2, y2);
         if (!end.ok) return coordinateError(end);
         if (!start.sameTarget(end)) return coordinateError(CoordinateResolution.error("stale_target"));
+        int[] xs = new int[17], ys = new int[17];
         for (int step = 0; step <= 16; step++) {
-            int x = start.x + (end.x - start.x) * step / 16;
-            int y = start.y + (end.y - start.y) * step / 16;
-            String blocked = gestureBlockReason(start.target, x, y);
-            if (!blocked.isEmpty()) return coordinateError(CoordinateResolution.error(blocked));
+            xs[step] = start.x + (end.x - start.x) * step / 16;
+            ys[step] = start.y + (end.y - start.y) * step / 16;
         }
+        String blocked = gestureBlockReason(start.target, xs, ys);
+        if (!blocked.isEmpty()) return coordinateError(CoordinateResolution.error(blocked));
         boolean ok = swipe(start.target, start.x, start.y, end.x, end.y, duration);
         return json(200, "{\"ok\":" + ok + ",\"target\":" + start.target.toJson() +
                 (start.transformed ? ",\"coordinateSpace\":\"screenshot\",\"screenX1\":" + start.x +
@@ -2700,8 +2725,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 return json(200, body);
             }
             if (i < attempts) {
-                scroll(scrollParams);
-                sleep(Math.max(interval, gestureDuration + 32));
+                long iterationStarted = System.nanoTime();
+                Response scrolled = scroll(scrollParams);
+                if (!"true".equals(parseJsonObject(new String(scrolled.body, StandardCharsets.UTF_8)).get("ok")))
+                    return scrolled;
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - iterationStarted);
+                sleep(Math.max(0L, interval - elapsedMs));
             }
         }
         return json(404, "{\"ok\":false,\"error\":\"not_found\",\"texts\":" + visibleTextsJson(12, true) + "}");
@@ -2993,7 +3022,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
             }
         };
         try {
-            ScreenshotCallback callback = new ScreenshotCallback(completion, restoreIndicator);
+            long acquisitionStarted = System.nanoTime();
+            ScreenshotCallback callback = new ScreenshotCallback(completion, restoreIndicator,
+                    now -> performanceMetrics.phases.record(PhaseTimings.Phase.CAPTURE_ACQUISITION, now - acquisitionStarted),
+                    nanos -> performanceMetrics.phases.record(PhaseTimings.Phase.BITMAP_COPY, nanos),
+                    nanos -> performanceMetrics.phases.record(PhaseTimings.Phase.PNG_ENCODING, nanos));
             if (windowScopedCapture) {
                 takeScreenshotOfWindow(screenshotWindowId, executor, callback);
             } else {
@@ -3175,26 +3208,44 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Path path = new Path();
         path.moveTo(x, y);
         checkControl();
-        return controlledDispatch(() -> dispatchGesture(gestureBuilderForTarget(target)
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
-                .build(), null, null));
+        return dispatchAndAwaitGesture(gestureBuilderForTarget(target)
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 50)).build(), 50);
     }
 
     private boolean swipe(TargetRef target, int x1, int y1, int x2, int y2, int duration) {
         if (Build.VERSION.SDK_INT < 24) return false;
+        int[] xs = new int[17], ys = new int[17];
         for (int step = 0; step <= 16; step++) {
-            int x = x1 + (x2 - x1) * step / 16;
-            int y = y1 + (y2 - y1) * step / 16;
-            if (isGesturePointBlocked(target, x, y)) return false;
+            xs[step] = x1 + (x2 - x1) * step / 16;
+            ys[step] = y1 + (y2 - y1) * step / 16;
         }
+        if (!gestureBlockReason(target, xs, ys).isEmpty()) return false;
         showSwipeGesture(x1, y1, x2, y2, duration);
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
         checkControl();
-        return controlledDispatch(() -> dispatchGesture(gestureBuilderForTarget(target)
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(1, duration)))
-                .build(), null, null));
+        return dispatchAndAwaitGesture(gestureBuilderForTarget(target)
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(1, duration))).build(),
+                Math.max(1, duration));
+    }
+
+    private boolean dispatchAndAwaitGesture(GestureDescription gesture, int durationMs) {
+        CaptureCompletion<Boolean> completion = new CaptureCompletion<>();
+        long started = System.nanoTime();
+        boolean accepted;
+        try {
+            accepted = controlledDispatch(() -> dispatchGesture(gesture, new GestureResultCallback() {
+                @Override public void onCompleted(GestureDescription ignored) { completion.complete(true); }
+                @Override public void onCancelled(GestureDescription ignored) { completion.complete(false); }
+            }, null));
+        } finally { performanceMetrics.phases.record(PhaseTimings.Phase.GESTURE_DISPATCH, System.nanoTime() - started); }
+        if (!accepted) return false;
+        long waiting = System.nanoTime();
+        try {
+            GestureWait.await(completion, durationMs, this::checkControl);
+            return true;
+        } finally { performanceMetrics.phases.record(PhaseTimings.Phase.GESTURE_COMPLETION, System.nanoTime() - waiting); }
     }
 
     private boolean isGesturePointBlocked(TargetRef target, int x, int y) {
@@ -3202,14 +3253,22 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private String gestureBlockReason(TargetRef target, int x, int y) {
+        return gestureBlockReason(target, new int[]{x}, new int[]{y});
+    }
+
+    private String gestureBlockReason(TargetRef target, int[] xs, int[] ys) {
         if (target == null) return "stale_target";
-        if (!target.bounds.contains(x, y)) return "target_outside";
-        if (!target.actionableRegion.contains(x, y)) return "target_occluded";
+        for (int i = 0; i < xs.length; i++) {
+            if (!target.bounds.contains(xs[i], ys[i])) return "target_outside";
+            if (!target.actionableRegion.contains(xs[i], ys[i])) return "target_occluded";
+        }
         List<AccessibilityWindowInfo> windows = allWindows();
         int targetLayer = Integer.MIN_VALUE;
         for (AccessibilityWindowInfo window : windows) {
             if (window != null && window.getId() == target.windowId
                     && (Build.VERSION.SDK_INT < 30 || window.getDisplayId() == target.displayId)) {
+                Rect currentBounds = new Rect(); window.getBoundsInScreen(currentBounds);
+                if (!currentBounds.equals(target.bounds)) { recycleWindows(windows); return "stale_target"; }
                 AccessibilityNodeInfo root = windowRoot(window);
                 String packageName = root == null ? "" : str(root.getPackageName());
                 if (root != null) root.recycle();
@@ -3231,9 +3290,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
             if (displayId != target.displayId) continue;
             Region touchable = new Region();
             window.getRegionInScreen(touchable);
-            if (touchable.contains(x, y)) {
-                recycleWindows(windows);
-                return "target_occluded";
+            for (int i = 0; i < xs.length; i++) {
+                if (touchable.contains(xs[i], ys[i])) {
+                    recycleWindows(windows);
+                    return "target_occluded";
+                }
             }
         }
         recycleWindows(windows);
@@ -4613,34 +4674,27 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private void showPointGesture(int x, int y) {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay == null) return;
-        long travelMs = overlay.showPoint(x, y);
-        if (travelMs <= 0L) return;
-        awaitCursorTravel(travelMs);
-        overlay.commitPreparedAction();
+        java.util.function.BooleanSupplier guard = activePresentationGuard();
+        requestVisualCue.set(() -> overlay.showAcceptedAction(AgentVisualModel.GLOVE_POSE_POINT,
+                x, y, x, y, 0, guard));
     }
 
     private void showSwipeGesture(int x1, int y1, int x2, int y2, int durationMs) {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay == null) return;
-        long travelMs = overlay.showSwipe(x1, y1, x2, y2, durationMs);
-        if (travelMs <= 0L) return;
-        awaitCursorTravel(travelMs);
-        overlay.commitPreparedAction();
+        java.util.function.BooleanSupplier guard = activePresentationGuard();
+        requestVisualCue.set(() -> overlay.showAcceptedAction(AgentVisualModel.GLOVE_POSE_OPEN_PALM,
+                x1, y1, x2, y2, durationMs, guard));
     }
 
     private void showBackGesture() {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay == null) return;
         Rect screen = screenBounds();
-        long travelMs = overlay.showBack(screen.right, screen.centerY());
-        if (travelMs <= 0L) return;
-        awaitCursorTravel(travelMs);
-        overlay.commitPreparedAction();
-    }
-
-    private void awaitCursorTravel(long durationMs) {
-        if (durationMs <= 0L || Looper.myLooper() == Looper.getMainLooper()) return;
-        sleep(Math.min(AgentVisualModel.CURSOR_MOVE_MAX_MS, durationMs));
+        java.util.function.BooleanSupplier guard = activePresentationGuard();
+        requestVisualCue.set(() -> overlay.showAcceptedAction(AgentVisualModel.GLOVE_POSE_BACK_LEFT,
+                Math.round(screen.right * .82f), screen.centerY(), Math.round(screen.right * .22f),
+                screen.centerY(), 420, guard));
     }
 
     private void removeWsSession(WsSession session) {
@@ -4975,14 +5029,22 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private static final class ScreenshotCallback implements TakeScreenshotCallback {
         private final CaptureCompletion<ScreenshotPixels> completion;
         private final Runnable onCaptured;
+        private final java.util.function.LongConsumer acquired, copied, encoded;
 
         ScreenshotCallback(CaptureCompletion<ScreenshotPixels> completion, Runnable onCaptured) {
-            this.completion = completion;
-            this.onCaptured = onCaptured;
+            this(completion, onCaptured, ignored -> {}, ignored -> {}, ignored -> {});
+        }
+
+        ScreenshotCallback(CaptureCompletion<ScreenshotPixels> completion, Runnable onCaptured,
+                java.util.function.LongConsumer acquired, java.util.function.LongConsumer copied,
+                java.util.function.LongConsumer encoded) {
+            this.completion = completion; this.onCaptured = onCaptured;
+            this.acquired = acquired; this.copied = copied; this.encoded = encoded;
         }
 
         @Override
         public void onSuccess(ScreenshotResult screenshot) {
+            acquired.accept(System.nanoTime());
             HardwareBuffer buffer = null;
             Bitmap hardwareBitmap = null;
             Bitmap bitmap = null;
@@ -4994,7 +5056,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
                     completion.complete(ScreenshotPixels.failure("bitmap_wrap_failed"));
                     return;
                 }
-                bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
+                long copyStarted = System.nanoTime();
+                try { bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false); }
+                finally { copied.accept(System.nanoTime() - copyStarted); }
                 if (bitmap == null) {
                     completion.complete(ScreenshotPixels.failure("bitmap_copy_failed"));
                     return;
@@ -5005,7 +5069,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 onCaptured.run();
                 if (completion.isDone()) return;
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
-                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                long encodeStarted = System.nanoTime();
+                boolean compressed;
+                try { compressed = bitmap.compress(Bitmap.CompressFormat.PNG, 100, out); }
+                finally { encoded.accept(System.nanoTime() - encodeStarted); }
+                if (!compressed) {
                     completion.complete(ScreenshotPixels.failure("png_encoding_failed"));
                     return;
                 }
@@ -5023,6 +5091,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
         @Override
         public void onFailure(int errorCode) {
+            acquired.accept(System.nanoTime());
             onCaptured.run();
             completion.complete(ScreenshotPixels.failure("take_screenshot_failed_" + errorCode));
         }

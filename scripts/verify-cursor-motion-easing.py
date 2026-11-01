@@ -76,12 +76,7 @@ require(
     "MotionEasing.doubleSmoothstep(\n                    (nowMs - actionStartedAtMs)",
     "Back and swipe/scroll action paths must use the sharp shared easing curve",
 )
-for operation in ("showPoint", "showSwipe", "showBack"):
-    require(
-        overlay,
-        f"long {operation}",
-        f"{operation} must remain routed through the shared coordinate controller",
-    )
+require(overlay, "void showAcceptedAction", "all accepted cues must use the shared coordinate controller")
 
 with tempfile.TemporaryDirectory() as directory:
     temp = Path(directory)

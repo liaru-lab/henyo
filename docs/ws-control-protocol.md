@@ -217,6 +217,12 @@ changed the UI. HTTP failures carry the same outcome; formerly successful HTTP
 responses with `ok:false` now use status 409. Successful mutations continue to
 mean Android accepted the request, independently of subsequent foreground or
 postcondition verification. A failed postcondition must not erase that success.
+Coordinate gestures additionally wait for Android's native completion callback
+before returning success, so consecutive fast requests do not cancel each
+other. `gesture_cancelled`, `gesture_timeout`, and `gesture_interrupted` carry
+`outcome:"unknown"` and must not be replayed automatically. Native completion
+still does not prove an application postcondition. Cursor animation and caption
+attachment do not delay submission. See [control-loop measurements](control-loop-performance.md).
 
 ## Task Progress Presentation
 

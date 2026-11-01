@@ -163,21 +163,9 @@ final class ConnectionStatusOverlay {
             if (guard.getAsBoolean()) noteControlActivityOnMain(summary);
             return;
         }
-        CountDownLatch applied = new CountDownLatch(1);
         mainHandler.post(() -> {
-            try {
-                if (guard.getAsBoolean()) noteControlActivityOnMain(summary);
-            } finally {
-                applied.countDown();
-            }
+            if (guard.getAsBoolean()) noteControlActivityOnMain(summary);
         });
-        try {
-            // Bound the protocol thread wait: the intent is attached before the
-            // action whenever the UI thread is healthy, without stalling control.
-            applied.await(120L, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     boolean setTaskProgress(Object owner, String goal, List<String> completed, String current,
@@ -355,30 +343,19 @@ final class ConnectionStatusOverlay {
         });
     }
 
-    long showPoint(int x, int y) {
-        return prepareVisual(now -> visualCoordinates.prepareAction(
-                visualModel, AgentVisualModel.GLOVE_POSE_POINT,
-                x, y, x, y, 0, displayWidth(), displayHeight(), displayDensity(), now));
-    }
-
-    long showSwipe(int x1, int y1, int x2, int y2, int durationMs) {
-        return prepareVisual(now -> visualCoordinates.prepareAction(
-                visualModel, AgentVisualModel.GLOVE_POSE_OPEN_PALM,
-                x1, y1, x2, y2, Math.max(1, durationMs),
-                displayWidth(), displayHeight(), displayDensity(), now));
-    }
-
-    long showBack(int screenRight, int centerY) {
-        int startX = Math.round(screenRight * 0.82f);
-        int endX = Math.round(screenRight * 0.22f);
-        return prepareVisual(now -> visualCoordinates.prepareAction(
-                visualModel, AgentVisualModel.GLOVE_POSE_BACK_LEFT,
-                startX, centerY, endX, centerY, 420,
-                displayWidth(), displayHeight(), displayDensity(), now));
-    }
-
-    private interface VisualPreparation {
-        long apply(long nowMs);
+    void showAcceptedAction(int pose, int x1, int y1, int x2, int y2, int duration,
+                            java.util.function.BooleanSupplier guard) {
+        mainHandler.post(() -> {
+            if (destroyed || !connected || controlStopped || !guard.getAsBoolean()) return;
+            long started = System.nanoTime();
+            long now = SystemClock.uptimeMillis();
+            visualCoordinates.prepareAction(visualModel, pose, x1, y1, x2, y2, duration,
+                    displayWidth(), displayHeight(), displayDensity(), now);
+            visualCoordinates.beginPreparedAction(visualModel, now);
+            ensureActivityView();
+            if (activityView != null) activityView.invalidate();
+            performanceMetrics.phases.record(PhaseTimings.Phase.PRESENTATION, System.nanoTime() - started);
+        });
     }
 
     private void postVisual(Runnable update) {
@@ -388,75 +365,6 @@ final class ConnectionStatusOverlay {
             ensureActivityView();
             if (activityView != null) activityView.invalidate();
         });
-    }
-
-    private long prepareVisual(VisualPreparation preparation) {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            if (destroyed || !connected) return 0L;
-            long duration = preparation.apply(SystemClock.uptimeMillis());
-            ensureActivityView();
-            if (activityView != null) activityView.invalidate();
-            return duration;
-        }
-        CountDownLatch applied = new CountDownLatch(1);
-        long[] duration = new long[1];
-        AtomicBoolean pending = new AtomicBoolean(true);
-        mainHandler.post(() -> {
-            try {
-                if (!pending.compareAndSet(true, false)) return;
-                if (destroyed || !connected) return;
-                duration[0] = preparation.apply(SystemClock.uptimeMillis());
-                ensureActivityView();
-                if (activityView != null) activityView.invalidate();
-            } finally {
-                applied.countDown();
-            }
-        });
-        try {
-            if (!applied.await(120L, TimeUnit.MILLISECONDS)) {
-                pending.compareAndSet(true, false);
-                return 0L;
-            }
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-            return 0L;
-        }
-        return duration[0];
-    }
-
-    boolean commitPreparedAction() {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            if (destroyed || !connected) return false;
-            boolean committed = visualCoordinates.beginPreparedAction(
-                    visualModel, SystemClock.uptimeMillis());
-            if (activityView != null) activityView.invalidate();
-            return committed;
-        }
-        CountDownLatch applied = new CountDownLatch(1);
-        AtomicBoolean pending = new AtomicBoolean(true);
-        boolean[] committed = new boolean[1];
-        mainHandler.post(() -> {
-            try {
-                if (!pending.compareAndSet(true, false)) return;
-                if (destroyed || !connected) return;
-                committed[0] = visualCoordinates.beginPreparedAction(
-                        visualModel, SystemClock.uptimeMillis());
-                if (activityView != null) activityView.invalidate();
-            } finally {
-                applied.countDown();
-            }
-        });
-        try {
-            if (!applied.await(120L, TimeUnit.MILLISECONDS)) {
-                pending.compareAndSet(true, false);
-                return false;
-            }
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-            pending.compareAndSet(true, false);
-            return false;
-        }
-        return committed[0];
     }
 
     private int displayWidth() {
@@ -984,8 +892,10 @@ final class ConnectionStatusOverlay {
             }
             float progress = actionDurationMs <= 0 ? 1f : MotionEasing.doubleSmoothstep(
                     (nowMs - actionStartedAtMs) / (float) actionDurationMs);
-            result[0] = mix(travelToX, actionToX, progress);
-            result[1] = mix(travelToY, actionToY, progress);
+            float travel = MotionEasing.doubleSmoothstep((nowMs - travelStartedAtMs)
+                    / (float) Math.max(1, travelDurationMs));
+            result[0] = mix(travelFromX, mix(travelToX, actionToX, progress), travel);
+            result[1] = mix(travelFromY, mix(travelToY, actionToY, progress), travel);
         }
 
         boolean isAnimating(long nowMs) {
@@ -993,7 +903,7 @@ final class ConnectionStatusOverlay {
             if (nowMs < actionStartedAtMs) {
                 return nowMs < travelStartedAtMs + travelDurationMs;
             }
-            return nowMs < actionStartedAtMs + actionDurationMs;
+            return nowMs < Math.max(travelStartedAtMs + travelDurationMs, actionStartedAtMs + actionDurationMs);
         }
 
         void clear() {

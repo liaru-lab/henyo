@@ -646,3 +646,7 @@ service off/on if `/ui/tree` returns `{"ok":false,"error":"no_root"}`.
 ## License
 
 Copyright 2026 liaru. Licensed under the [Apache License 2.0](LICENSE).
+
+
+Control-loop timing methodology, bounded phase metrics, and local measured
+results are documented in [control-loop performance](docs/control-loop-performance.md).

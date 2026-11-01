@@ -286,6 +286,7 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyControlLatency", "verifyGestureGuard", "verifyPerformanceMetrics"
     dependsOn "verifyObservationEffects", "verifyAgentVisualModel"
     dependsOn "verifyConnectionOverlay"
     dependsOn "verifyActivityPanelLayout"
@@ -444,4 +445,18 @@ tasks.register("clean") {
     doLast {
         delete(outDir)
     }
+}
+
+
+tasks.register("verifyControlLatency", Exec) {
+    commandLine "python", "scripts/verify-control-latency.py"
+}
+
+tasks.register("verifyPerformanceMetrics", Exec) {
+    commandLine "python", "scripts/verify-performance-metrics.py"
+}
+
+
+tasks.register("verifyGestureGuard", Exec) {
+    commandLine "python", "scripts/verify-gesture-guard.py"
 }

@@ -8,6 +8,7 @@ final class PerformanceMetrics {
     static final long DRAW_GAP_THRESHOLD_MS = 40L;
     static final long HEARTBEAT_LATE_THRESHOLD_MS = 20L;
 
+    final PhaseTimings phases = new PhaseTimings();
     private final AtomicLong epoch = new AtomicLong();
     private final AtomicLong launchWindowUntilMs = new AtomicLong();
     private final AtomicLong launchCount = new AtomicLong();
@@ -48,6 +49,7 @@ final class PerformanceMetrics {
     }
 
     void reset() {
+        phases.reset();
         epoch.incrementAndGet();
         launchWindowUntilMs.set(0L);
         for (AtomicLong counter : new AtomicLong[]{
@@ -132,7 +134,7 @@ final class PerformanceMetrics {
     }
 
     String toJson() {
-        return "{\"epoch\":" + epoch.get() +
+        return "{\"phases\":" + phases.toJson() + ",\"epoch\":" + epoch.get() +
                 ",\"launch\":{\"count\":" + launchCount.get() +
                 ",\"failureCount\":" + launchFailureCount.get() +
                 ",\"dispatchTotalUs\":" + launchDispatchTotalUs.get() +
