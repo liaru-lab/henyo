@@ -504,3 +504,14 @@ requests are also valid when callers share request-building code.
 TCP helper IPC is loopback-only and protected by the runtime helper token in the
 discovery file. Keep the discovery file local, avoid logging its contents, and
 do not expose helper IPC ports outside the device or workstation.
+
+
+### Observation-only task boundaries
+
+`{"cmd":"task.start"}` sends `task.start` and returns its result. The CLI is
+`bin/henyo task start`. Call it before a new task that only reads the screen,
+including a new task following completion on the same helper connection.
+An active task keeps its ID; after completion the helper allocates a fresh ID.
+Finish active work before beginning another task. Reading `tree`, `current`,
+or `observe` alone does not allocate a task or revive dismissed presentation.
+Use `completion.show` or `progress.finish` to complete the started task.
