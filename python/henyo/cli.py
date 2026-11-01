@@ -956,6 +956,7 @@ def usage() -> None:
   henyo helper start|stop|status|logs
   henyo helper reload-auth
   henyo cache tree|clear
+  henyo workflow run FILE
   henyo task start
   henyo progress set --goal TEXT [--step STATUS TEXT ...] [--replan]
   henyo progress set [--goal TEXT] [--completed TEXT ...] [--current TEXT]
@@ -1002,6 +1003,16 @@ def main(argv=None) -> int:
         if rest and rest[0] == "clear":
             return print_json(helper_request({"cmd": "cache.clear"}))
         usage(); return 2
+    if cmd == "workflow":
+        if len(rest) != 2 or rest[0] != "run":
+            usage(); return 2
+        raw = Path(rest[1]).read_bytes()
+        if len(raw) > 32768:
+            raise SystemExit("workflow plan exceeds 32768 bytes")
+        plan = json.loads(raw)
+        if not isinstance(plan, dict):
+            raise SystemExit("workflow plan must be a JSON object")
+        return print_json(helper_request({"cmd":"call", "op":"workflow.run", "params":plan}))
     if cmd == "task":
         if rest != ["start"]:
             usage(); return 2

@@ -45,6 +45,7 @@ KNOWN_DEVICE_STATES = frozenset({
 })
 KNOWN_OPERATOR_ACTIONS = frozenset({"physical_reboot_then_first_unlock"})
 KNOWN_CAPABILITY_FEATURES = frozenset({
+    "conditionalWorkflows",
     "expectedServiceEpoch",
     "mutationOutcome",
     "taskLifecycle",
@@ -65,6 +66,7 @@ KNOWN_CAPABILITY_LIMITS = frozenset({
     "timeoutMs",
 })
 KNOWN_CAPABILITY_OPERATIONS = frozenset({
+    "workflow.run",
     "ui.tree", "ui.find", "ui.click", "ui.setText", "ui.tap", "ui.swipe",
     "ui.scroll", "ui.scrollUntil", "ui.wait", "ui.observe",
     "app.current", "app.list", "app.launch", "app.openUri", "app.start", "app.activate",
@@ -158,6 +160,11 @@ def sanitize_operation_capability(name: str, detail: Any) -> Dict[str, Any]:
     if not isinstance(detail, dict) or not isinstance(detail.get("mutates"), bool):
         raise SessionMetadataError("capability_invalid")
     safe: Dict[str, Any] = {"mutates": detail["mutates"]}
+    if name == "workflow.run":
+        fixed = {"mutates": True, "experimental": True, "maxSteps": 16, "maxDepth": 2, "maxBudgetMs": 5000}
+        if any(type(detail.get(key)) is not type(value) or detail.get(key) != value for key,value in fixed.items()):
+            raise SessionMetadataError("capability_invalid")
+        safe.update(fixed)
     if name == "ui.tree":
         if detail["mutates"] is not False:
             raise SessionMetadataError("capability_invalid")
@@ -474,6 +481,7 @@ BATCH_MUTATING_OPS = frozenset({
 })
 
 TASK_MUTATING_OPS = BATCH_MUTATING_OPS | frozenset({
+    "workflow.run",
     "app.activate", "termux.exec", "input.text", "input.key", "task.start", "task.progress.set",
 })
 TASK_FINISH_OPS = frozenset({"task.progress.finish", "task.completion.show"})

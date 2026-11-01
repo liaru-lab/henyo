@@ -73,6 +73,7 @@ public final class NodeDispatchTest {
     void recycleWindows(List<AccessibilityWindowInfo> ignored){recycled++;}
     String str(Object value){return value==null?"":value.toString();}
     void requireRootAccess(AccessibilityNodeInfo node){if(node.protectedUi)throw new OperationFailure("sensitive_ui_permission_required",403,"not_applied");}
+    void requireWorkflowNodePoint(AccessibilityNodeInfo node,List<AccessibilityWindowInfo> windows,AccessibilityWindowInfo window,AccessibilityNodeInfo root) {}
     boolean controlledDispatch(java.util.function.Supplier<Boolean> action){dispatches++;return action.get();}
     static void check(boolean value,String message){if(!value)throw new AssertionError(message);}
     public static void main(String[] args){

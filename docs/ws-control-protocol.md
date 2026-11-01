@@ -785,3 +785,6 @@ stay usable:
   clients during migration.
 
 For a minimal local smoke check list, see [ws verification](./ws-verification.md).
+
+
+The experimental `workflow.run` operation accepts bounded conditional fragments. See [Conditional workflows](conditional-workflows.md) for schema, limits, partial results and cancellation. Errors can include a partial `result`; retain it when deciding whether an action may already have occurred.

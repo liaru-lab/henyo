@@ -515,3 +515,6 @@ An active task keeps its ID; after completion the helper allocates a fresh ID.
 Finish active work before beginning another task. Reading `tree`, `current`,
 or `observe` alone does not allocate a task or revive dismissed presentation.
 Use `completion.show` or `progress.finish` to complete the started task.
+
+
+`henyo workflow run FILE` sends a single experimental `workflow.run` call with a helper task ID. See [Conditional workflows](conditional-workflows.md). Preserve partial error results; never replay the whole plan automatically.

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Henyo workflow fixture</title>
+<style>body{font:20px system-ui;background:#f5f6f8;color:#20242b;margin:0;padding:24px}main{max-width:540px;margin:auto}button{display:block;font:inherit;padding:18px 24px;margin:20px 0;border:1px solid #cbd1db;border-radius:14px;background:white;color:#20242b}#state{min-height:260px}small{color:#596372}</style>
+<main><h1>Henyo workflow fixture</h1><p id="goal"></p><section id="state" aria-live="polite"></section><p id="searches"></p><p id="opens"></p><button id="reset"></button><small>Synthetic local test. No external resources or stored input.</small></main>
+<script>
+'use strict';
+const parameters=new URLSearchParams(location.search),ja=parameters.get('lang')==='ja';
+const words=ja?{goal:'目的: Example Notes を開く',search:'検索',loading:'検索中',done:'Example Notes を開きました',reset:'フィクスチャをリセット',searches:'検索回数: ',opens:'開いた回数: '}:{goal:'Goal: Open Example Notes',search:'Search',loading:'Loading results',done:'Opened Example Notes',reset:'Reset fixture',searches:'Search count: ',opens:'Open count: '};
+document.documentElement.lang=ja?'ja':'en';
+const state=document.querySelector('#state');let searches=0,opens=0,timer;
+function counts(){document.querySelector('#searches').textContent=words.searches+searches;document.querySelector('#opens').textContent=words.opens+opens;}
+function button(text,action){const node=document.createElement('button');node.textContent=text;node.onclick=action;state.append(node);}
+function open(){opens++;state.replaceChildren();const node=document.createElement('h2');node.textContent=words.done;state.append(node);counts();}
+function search(){searches++;state.replaceChildren();const node=document.createElement('p');node.textContent=words.loading;node.setAttribute('role','status');state.append(node);counts();timer=setTimeout(()=>{state.replaceChildren();button('Example Notes',open);if(parameters.get('ambiguous')==='1')button('Example Notes',open);},350);}
+function reset(){clearTimeout(timer);searches=0;opens=0;state.replaceChildren();button(words.search,search);counts();}
+document.querySelector('#goal').textContent=words.goal;document.querySelector('#reset').textContent=words.reset;document.querySelector('#reset').onclick=reset;reset();
+</script></html>

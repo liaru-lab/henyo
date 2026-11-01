@@ -87,6 +87,10 @@ public final class OperationOutcomesHarness {
         service.unavailable = false;
         Response gone = service.waitText(Map.of("text", "missing"), true);
         check(gone.status == 200 && gone.body.contains("\"gone\":true"), "confirmed absence succeeds");
+        ConditionalWorkflow.Result partial = new ConditionalWorkflow.Result("needs_agent", "workflow_needs_agent", 2, 1, true, java.util.Collections.emptyList());
+        WsCallResult workflow = WsCallResult.workflow("synthetic", partial, 1);
+        check(!workflow.ok && workflow.toFrameJson().contains("\"actionsAccepted\":1"), "partial workflow result retained");
+        check(workflow.toFrameJson().contains("\"outcome\":\"unknown\""), "partial workflow outcome unknown");
         WsCallResult failure = WsCallResult.failure("synthetic", "deadline_exceeded", "not_applied", 1);
         check(failure.toFrameJson().contains("\"outcome\":\"not_applied\""), "call outcome serialized");
         check(failure.toStepJson().contains("\"outcome\":\"not_applied\""), "batch outcome serialized");
@@ -155,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix="henyo-outcomes-") as directory:
     production = root / "src/main/java/link/liaru/henyo"
     subprocess.run(["javac", "--release", "11", "-d", directory,
                     *[str(production / name) for name in (
-                        "OperationDeadline.java", "OperationFailure.java", "SearchCoverage.java",
+                        "OperationDeadline.java", "OperationFailure.java", "SearchCoverage.java", "ConditionalWorkflow.java",
                         "OperationTargetConstraint.java", "WindowTargetResolver.java",
                         "TargetHistoryStore.java")], str(path)], check=True)
     subprocess.run(["java", "-cp", directory, "link.liaru.henyo.OperationOutcomesHarness"], check=True)
