@@ -121,6 +121,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 thread.setDaemon(true);
                 return thread;
             });
+    private final ThreadPoolExecutor screenshotExecutor = new ThreadPoolExecutor(
+            2, 2, 30L, TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(16), r -> {
+                Thread thread = new Thread(r, "henyo-screenshot");
+                thread.setDaemon(true);
+                return thread;
+            });
     private volatile boolean running;
     private volatile long lastEventTime;
     private ServerSocket serverSocket;
@@ -243,6 +249,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         closeHttpServer();
         clientExecutor.shutdownNow();
         windowRootExecutor.shutdownNow();
+        // Drain callbacks so that hardware buffers are released even at shutdown.
+        screenshotExecutor.shutdown();
         super.onDestroy();
     }
 
@@ -2659,29 +2667,38 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 overlay.endScreenshotSuppression();
             }
         };
-        CountDownLatch latch = new CountDownLatch(1);
+        CaptureCompletion<ScreenshotPixels> completion = new CaptureCompletion<>();
         Executor executor = command -> {
-            if (Looper.myLooper() == Looper.getMainLooper()) command.run();
-            else getMainExecutor().execute(command);
+            try {
+                screenshotExecutor.execute(command);
+            } catch (RejectedExecutionException e) {
+                // Never drop a platform callback that owns a hardware buffer.
+                command.run();
+            }
         };
         try {
-            ScreenshotCallback callback = new ScreenshotCallback(capture, latch, restoreIndicator);
+            ScreenshotCallback callback = new ScreenshotCallback(completion, restoreIndicator);
             if (windowScopedCapture) {
                 takeScreenshotOfWindow(screenshotWindowId, executor, callback);
             } else {
                 takeScreenshot(screenshotDisplayId, executor, callback);
             }
-            if (!latch.await(intParam(params, "timeout", 5000), TimeUnit.MILLISECONDS)) {
-                capture.error = "timeout";
-            }
+            if (completion.await(intParam(params, "timeout", 5000)) == null)
+                completion.complete(ScreenshotPixels.failure("timeout"));
         } catch (RuntimeException e) {
-            capture.error = e.getClass().getSimpleName();
+            completion.complete(ScreenshotPixels.failure(e.getClass().getSimpleName()));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            capture.error = "interrupted";
+            completion.complete(ScreenshotPixels.failure("interrupted"));
         } finally {
             restoreIndicator.run();
         }
+        ScreenshotPixels pixels = completion.value();
+        capture.error = pixels.error;
+        capture.bytes = pixels.bytes;
+        capture.imageWidth = pixels.width;
+        capture.imageHeight = pixels.height;
+        capture.timestampElapsedRealtimeMs = pixels.timestamp;
         capture.endElapsedRealtimeMs = SystemClock.elapsedRealtime();
         if (capture.bytes != null) {
             finalizeCaptureCoordinates(capture);
@@ -4564,53 +4581,76 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
     }
 
+    private static final class ScreenshotPixels {
+        final byte[] bytes;
+        final int width;
+        final int height;
+        final long timestamp;
+        final String error;
+
+        ScreenshotPixels(byte[] bytes, int width, int height, long timestamp, String error) {
+            this.bytes = bytes; this.width = width; this.height = height;
+            this.timestamp = timestamp; this.error = error;
+        }
+
+        static ScreenshotPixels failure(String error) {
+            return new ScreenshotPixels(null, 0, 0, 0, error);
+        }
+    }
+
     private static final class ScreenshotCallback implements TakeScreenshotCallback {
-        private final ScreenshotCapture capture;
-        private final CountDownLatch latch;
+        private final CaptureCompletion<ScreenshotPixels> completion;
         private final Runnable onCaptured;
 
-        ScreenshotCallback(ScreenshotCapture capture, CountDownLatch latch, Runnable onCaptured) {
-            this.capture = capture;
-            this.latch = latch;
+        ScreenshotCallback(CaptureCompletion<ScreenshotPixels> completion, Runnable onCaptured) {
+            this.completion = completion;
             this.onCaptured = onCaptured;
         }
 
         @Override
         public void onSuccess(ScreenshotResult screenshot) {
+            HardwareBuffer buffer = null;
+            Bitmap hardwareBitmap = null;
+            Bitmap bitmap = null;
             try {
-                capture.timestampElapsedRealtimeMs = screenshot.getTimestamp();
-                HardwareBuffer buffer = screenshot.getHardwareBuffer();
-                Bitmap hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.getColorSpace());
+                buffer = screenshot.getHardwareBuffer();
+                if (completion.isDone()) return;
+                hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.getColorSpace());
                 if (hardwareBitmap == null) {
-                    capture.error = "bitmap_wrap_failed";
+                    completion.complete(ScreenshotPixels.failure("bitmap_wrap_failed"));
                     return;
                 }
-                Bitmap bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
-                capture.imageWidth = bitmap.getWidth();
-                capture.imageHeight = bitmap.getHeight();
+                bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
+                if (bitmap == null) {
+                    completion.complete(ScreenshotPixels.failure("bitmap_copy_failed"));
+                    return;
+                }
                 // The hardware buffer may still be backed by compositor state.
                 // Keep the indicator suppressed until pixels are fixed in a
                 // CPU bitmap, then restore it before the slower PNG encoding.
                 onCaptured.run();
+                if (completion.isDone()) return;
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-                bitmap.recycle();
-                hardwareBitmap.recycle();
-                buffer.close();
-                capture.bytes = out.toByteArray();
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    completion.complete(ScreenshotPixels.failure("png_encoding_failed"));
+                    return;
+                }
+                completion.complete(new ScreenshotPixels(out.toByteArray(), bitmap.getWidth(),
+                        bitmap.getHeight(), screenshot.getTimestamp(), ""));
             } catch (Exception e) {
-                capture.error = e.getClass().getSimpleName();
+                completion.complete(ScreenshotPixels.failure(e.getClass().getSimpleName()));
             } finally {
+                try { if (bitmap != null) bitmap.recycle(); } catch (RuntimeException ignored) { }
+                try { if (hardwareBitmap != null) hardwareBitmap.recycle(); } catch (RuntimeException ignored) { }
+                try { if (buffer != null) buffer.close(); } catch (RuntimeException ignored) { }
                 onCaptured.run();
-                latch.countDown();
             }
         }
 
         @Override
         public void onFailure(int errorCode) {
             onCaptured.run();
-            capture.error = "take_screenshot_failed_" + errorCode;
-            latch.countDown();
+            completion.complete(ScreenshotPixels.failure("take_screenshot_failed_" + errorCode));
         }
     }
 }
