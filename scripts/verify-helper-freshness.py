@@ -111,6 +111,25 @@ def main():
         daemon.handle_event(tree_event())
         assert daemon.dispatch({"cmd": "tree"})["cached"] is True
         assert daemon.dispatch({"cmd": "current"})["cached"] is True
+        # Rendering constraints use the direct response even while an event is
+        # fresh. An unrelated event must not appear alongside that response.
+        direct_tree = {"root": {"text": "filtered"}}
+        daemon.ws.responses["ui.tree"] = {"ok": True, "result": direct_tree}
+        for params in ({"redact": True}, {"maxDepth": 1}, {"maxNodes": 1},
+                       {"onlyTextNodes": True}, {"futureOption": True}):
+            before = len(daemon.ws.calls)
+            response = daemon.dispatch({"cmd": "tree", "params": params})
+            assert response["cached"] is False
+            assert len(daemon.ws.calls) == before + 1
+            assert daemon.ws.calls[-1][1] == params
+            assert response["tree"] == direct_tree
+            assert "fresh" not in json.dumps(response)
+        daemon.ws.responses["ui.tree"] = {"ok": False, "code": "tree_unavailable"}
+        failed = daemon.dispatch({"cmd": "tree", "fresh": True})
+        assert failed["ok"] is False and failed["tree"] is None
+        assert "fresh" not in json.dumps(failed)
+        daemon.ws.responses.clear()
+        assert daemon.dispatch({"cmd": "tree"})["cached"] is True
         clock.value += 1001
         assert daemon.dispatch({"cmd": "tree"})["cached"] is False
         assert daemon.ws.calls[-1][0] == "ui.tree"
