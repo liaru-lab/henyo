@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix="henyo-performance-metrics-") as raw_dir
     test_file = package_dir / "PerformanceMetricsTest.java"
     test_file.write_text(TEST_SOURCE)
     subprocess.run(
-        ["javac", "-encoding", "UTF-8", "-d", str(directory), str(MODEL), str(test_file)],
+        ["javac", "-encoding", "UTF-8", "-d", str(directory), str(MODEL), str(MODEL.parent / "PhaseTimings.java"), str(test_file)],
         check=True,
     )
     subprocess.run(
