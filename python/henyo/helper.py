@@ -1214,6 +1214,10 @@ class HelperDaemon:
         return True
 
     def cached_tree_response(self, params: Dict[str, Any], max_age_ms: int) -> Optional[Dict[str, Any]]:
+        # Push events do not declare their rendering options. Only reuse them
+        # for the default event view; explicit options belong to a direct call.
+        if any(name not in WINDOW_TARGET_FIELDS for name in params):
+            return None
         cached = self.cached_response("tree", max_age_ms)
         if cached is None or not self.tree_target_matches(params, cached.get("tree")):
             return None
@@ -1495,8 +1499,8 @@ class HelperDaemon:
                 result = self.ws.call("ui.tree", params)
             else:
                 result = self.ws.call("ui.tree", params, display=display)
-            with self.cache_lock:
-                tree = self.cache.get("tree")
+            # A direct response must never include an unrelated push snapshot.
+            tree = result.get("result") if result.get("ok") else None
             return {"ok": result.get("ok", False), "cached": False, "result": result, "tree": tree}
         if cmd == "current":
             fresh = bool(request.get("fresh"))
