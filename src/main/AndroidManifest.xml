@@ -40,6 +40,9 @@
         </service>
 
         <receiver
+            android:name=".ControlActionReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".TermuxCommandResultReceiver"
             android:exported="false" />
     </application>

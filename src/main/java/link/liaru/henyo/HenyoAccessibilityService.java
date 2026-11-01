@@ -100,6 +100,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final Object captureMappingsLock = new Object();
     private final ThreadLocal<String> requestBearerToken = new ThreadLocal<>();
     private final ThreadLocal<String> requestTargetContextId = new ThreadLocal<>();
+    private final ThreadLocal<Long> requestControlTicket = new ThreadLocal<>();
+    private ControlOwnership controlOwnership;
     private final PerformanceMetrics performanceMetrics = new PerformanceMetrics();
     private final LinkedHashMap<String, CaptureCoordinateMapping> captureMappings = new LinkedHashMap<>();
     private final TargetHistoryStore targetHistoryStore = new TargetHistoryStore();
@@ -159,8 +161,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
         targetHistoryStore.clearAll();
         windowRootFailureCache.clearAll();
         bearerTokens = new BearerTokenManager(this);
+        controlOwnership = new ControlOwnership(getSharedPreferences("control", MODE_PRIVATE)
+                .getBoolean("stopped", false));
         adbWirelessDiscovery = new AdbWirelessDiscovery(this);
         connectionStatusOverlay = new ConnectionStatusOverlay(this, performanceMetrics);
+        connectionStatusOverlay.setControlActions(() -> setControlStopped(this, true),
+                () -> setControlStopped(this, false));
+        updateControlPresentation();
         tailscaleWatchdog = new TailscaleWatchdog(this);
         tailscaleWatchdog.start();
         startHttpServer();
@@ -230,6 +237,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         running = false;
+        ControlActionReceiver.cancel(this);
         if (instance == this) instance = null;
         if (connectionStatusOverlay != null) {
             connectionStatusOverlay.destroy();
@@ -252,6 +260,78 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (service != null && service.tailscaleWatchdog != null) {
             service.tailscaleWatchdog.checkSoon();
         }
+    }
+
+    static boolean isControlStopped(Context context) {
+        HenyoAccessibilityService service = instance;
+        return service == null || service.controlOwnership == null
+                ? context.getSharedPreferences("control", MODE_PRIVATE).getBoolean("stopped", false)
+                : service.controlOwnership.stopped();
+    }
+
+    static void setControlStopped(Context context, boolean stopped) {
+        HenyoAccessibilityService service = instance;
+        if (service != null && service.controlOwnership != null) {
+            if (stopped) service.controlOwnership.stop();
+            else service.controlOwnership.resume();
+        }
+        context.getSharedPreferences("control", MODE_PRIVATE).edit().putBoolean("stopped", stopped).apply();
+        if (service != null) service.updateControlPresentation();
+    }
+
+    private void updateControlPresentation() {
+        boolean stopped = controlOwnership.stopped();
+        if (connectionStatusOverlay != null) {
+            connectionStatusOverlay.setControlStopped(stopped);
+            if (stopped) connectionStatusOverlay.setConnected(false);
+            else refreshConnectionStatusOverlay();
+        }
+        ControlActionReceiver.updateNotification(this, stopped);
+    }
+
+    private void checkControl() {
+        Long ticket = requestControlTicket.get();
+        if (ticket == null) throw new ControlOwnership.Unavailable("control_stopped");
+        String token = requestBearerToken.get();
+        if (token != null && !token.isEmpty()
+                && !tokens().hasActiveScope(token, BearerTokenManager.SCOPE_CONTROL)) {
+            throw new ControlOwnership.Unavailable("auth_revoked");
+        }
+        controlOwnership.check(ticket, currentTargetContextId());
+    }
+
+    private boolean controlledGlobalAction(int action) {
+        return controlledDispatch(() -> performGlobalAction(action));
+    }
+
+    private <T> T controlledDispatch(java.util.function.Supplier<T> action) {
+        checkControl();
+        return controlOwnership.dispatch(requestControlTicket.get(), currentTargetContextId(), action);
+    }
+
+    private boolean controlledNodeAction(AccessibilityNodeInfo node, int action, Bundle arguments) {
+        return controlledDispatch(() -> node.performAction(action, arguments));
+    }
+
+    private void controlledStartActivity(Intent intent) {
+        controlledDispatch(() -> { startActivity(intent); return true; });
+    }
+
+    static void clientRevoked(String tokenId) {
+        HenyoAccessibilityService service = instance;
+        if (service == null) return;
+        List<WsSession> revoked = new ArrayList<>();
+        synchronized (service.wsSessionsLock) {
+            for (WsSession session : service.wsSessions) {
+                if (tokenId.equals(session.sessionTokenId)) {
+                    session.authenticated = false;
+                    revoked.add(session);
+                }
+            }
+        }
+        for (WsSession session : revoked) service.unregisterWsSession(session);
+        service.controlOwnership.release("token:" + tokenId);
+        service.targetHistoryStore.clear("token:" + tokenId);
     }
 
     static RemoteAccessConfig applyRemoteAccessConfig(Context context, RemoteAccessConfig.Update update)
@@ -438,11 +518,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 String token = bearerToken(headers.get("authorization"));
                 requestBearerToken.set(token);
                 requestTargetContextId.set(targetContextIdForToken(token));
+                requestControlTicket.set(controlOwnership.ticket());
                 try {
                     response = route(method, target, body);
+                } catch (ControlOwnership.Unavailable e) {
+                    response = json(409, "{\"ok\":false,\"code\":\"" + e.code + "\",\"error\":\"" + e.code + "\"}");
                 } finally {
                     requestBearerToken.remove();
                     requestTargetContextId.remove();
+                    requestControlTicket.remove();
                 }
             }
             byte[] responseBody = response.body;
@@ -524,7 +608,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 "Sec-WebSocket-Accept: " + WebSocketProtocol.acceptKey(key) + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
         out.flush();
 
-        WsSession session = new WsSession(out);
+        WsSession session = new WsSession(socket, out);
         session.authenticated = authenticated;
         session.sessionTokenId = sessionTokenId;
         session.sessionToken = sessionToken;
@@ -570,6 +654,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 } else if ("auth".equals(type)) {
                     BearerTokenManager.Verification verification = tokens().verify(message.get("token"), sourceAddress.getHostAddress());
                     if (verification.ok) {
+                        if (!session.sessionTokenId.equals(verification.record.id)
+                                && controlOwnership.owner().equals(session.sessionTokenId.isEmpty()
+                                        ? "local" : "token:" + session.sessionTokenId)) {
+                            sendWsError(session, id, "control_owned", "Disconnect before changing the controlling client identity");
+                            continue;
+                        }
                         authenticated = true;
                         sessionToken = message.get("token");
                         session.authenticated = true;
@@ -605,11 +695,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
                             continue;
                         }
                         session.touchControlActivity();
+                        requestControlTicket.set(controlOwnership.ticket());
                         try {
                             synchronized (controlExecutionLock) {
                                 executeWsBatch(session, id, frame.text);
                             }
                         } finally {
+                            requestControlTicket.remove();
                             session.touchControlActivity();
                         }
                     } else if ("call".equals(type)) {
@@ -619,11 +711,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         }
                         session.touchControlActivity();
                         WsCallResult result;
+                        requestControlTicket.set(controlOwnership.ticket());
                         try {
                             synchronized (controlExecutionLock) {
                                 result = executeWsCall(session, id, message.get("op"), frame.text);
                             }
                         } finally {
+                            requestControlTicket.remove();
                             session.touchControlActivity();
                         }
                         session.sendText(result.toFrameJson());
@@ -648,11 +742,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
         String contextId = session == null || session.sessionTokenId.isEmpty()
                 ? "local" : "token:" + session.sessionTokenId;
         requestTargetContextId.set(contextId);
+        requestBearerToken.set(session == null ? "" : session.sessionToken);
         lastTargetContextId = contextId;
         try {
             return executeWsCallInContext(session, id, op, frameText);
+        } catch (ControlOwnership.Unavailable e) {
+            return WsCallResult.error(id, e.code, e.code, 0);
         } finally {
             requestTargetContextId.remove();
+            requestBearerToken.remove();
         }
     }
 
@@ -664,6 +762,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
         String paramsJson = extractJsonMemberObject(frameText, "params");
         Map<String, String> parsedParams = parseJsonObject(paramsJson);
+        if (session != null && (!session.authenticated || session.closed
+                || (!session.sessionToken.isEmpty() && !tokens().hasActiveScope(
+                        session.sessionToken, BearerTokenManager.SCOPE_CONTROL)))) {
+            return WsCallResult.error(id, "auth_revoked", "Client access is no longer active", elapsed(started));
+        }
+        if (("POST".equals(spec.httpMethod) && !WsOperation.OP_UI_FIND.equals(spec.op)
+                && !WsOperation.OP_UI_WAIT.equals(spec.op)) || WsOperation.OP_TERMUX_EXEC.equals(spec.op)
+                || WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)
+                || WsOperation.OP_TASK_COMPLETION_SHOW.equals(spec.op)) checkControl();
         if (WsOperation.OP_TERMUX_EXEC.equals(spec.op)) {
             BearerTokenManager.Verification authorization = authorizedTermuxToken(session);
             if (!authorization.ok || !authorization.record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND)) {
@@ -944,7 +1051,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 params.getOrDefault("workdir", ""),
                 params.getOrDefault("stdin", ""),
                 timeoutMs);
-        TermuxCommandBridge.ExecutionResult result = TermuxCommandBridge.execute(this, request);
+        checkControl();
+        TermuxCommandBridge.ExecutionResult result = TermuxCommandBridge.execute(this, request,
+                command -> controlledDispatch(() -> startService(command)));
         return WsCallResult.ok(id, result.toJson(), elapsed(started));
     }
 
@@ -1113,6 +1222,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private boolean sendTreeSnapshot(WsSession session, UiTreeSnapshot snapshot, boolean settled, boolean timedOut,
                                      boolean suppressDuplicate, boolean forceSend) throws IOException {
+        if (controlOwnership.stopped()) return false;
+        if (session != null && (!session.authenticated || session.closed
+                || (!session.sessionToken.isEmpty() && !tokens().hasActiveScope(
+                        session.sessionToken, BearerTokenManager.SCOPE_CONTROL)))) return false;
         if (snapshot == null) {
             return false;
         }
@@ -1487,9 +1600,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if ("/app/current".equals(path)) return appCurrent();
         if ("/global/back".equals(path)) return serializedControl(() -> {
             showBackGesture();
-            return json(200, "{\"ok\":" + performGlobalAction(GLOBAL_ACTION_BACK) + "}");
+            return json(200, "{\"ok\":" + controlledGlobalAction(GLOBAL_ACTION_BACK) + "}");
         });
-        if ("/global/home".equals(path)) return json(200, "{\"ok\":" + performGlobalAction(GLOBAL_ACTION_HOME) + "}");
+        if ("/global/home".equals(path)) return json(200, "{\"ok\":" + controlledGlobalAction(GLOBAL_ACTION_HOME) + "}");
         return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
     }
 
@@ -1535,9 +1648,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if ("POST".equals(method) && "/v1/app/start".equals(path)) return appStart(params);
         if ("POST".equals(method) && "/v1/global/back".equals(path)) return serializedControl(() -> {
             showBackGesture();
-            return json(200, "{\"ok\":" + performGlobalAction(GLOBAL_ACTION_BACK) + "}");
+            return json(200, "{\"ok\":" + controlledGlobalAction(GLOBAL_ACTION_BACK) + "}");
         });
-        if ("POST".equals(method) && "/v1/global/home".equals(path)) return json(200, "{\"ok\":" + performGlobalAction(GLOBAL_ACTION_HOME) + "}");
+        if ("POST".equals(method) && "/v1/global/home".equals(path)) return json(200, "{\"ok\":" + controlledGlobalAction(GLOBAL_ACTION_HOME) + "}");
         return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
     }
 
@@ -1548,6 +1661,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private Response serializedControl(ControlResponse operation) {
         boolean outerControlCall = !Thread.holdsLock(controlExecutionLock);
         synchronized (controlExecutionLock) {
+            checkControl();
             if (outerControlCall) noteControlActivity("");
             return operation.run();
         }
@@ -1606,7 +1720,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (parsed.status == BearerAuthPolicy.AUTH_MISSING) return authError("auth_required");
         if (parsed.status == BearerAuthPolicy.AUTH_MALFORMED) return authError("auth_malformed");
         BearerTokenManager.Verification verification = tokens().verify(parsed.token, sourceAddress.getHostAddress());
-        if (verification.ok) return null;
+        if (verification.ok) {
+            if (endpointClass(method, target) == ENDPOINT_TOKEN_MANAGEMENT
+                    && !verification.record.hasScope(BearerTokenManager.SCOPE_TOKEN_MANAGEMENT)) {
+                return json(403, "{\"ok\":false,\"error\":\"token_management_permission_required\"}");
+            }
+            return null;
+        }
         return authError(verification.revoked ? "auth_revoked" : "auth_invalid");
     }
 
@@ -1849,6 +1969,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (tokenId == null || tokenId.isEmpty()) return json(404, "{\"ok\":false,\"error\":\"not_found\",\"code\":\"not_found\"}");
         String decodedTokenId = decode(tokenId);
         if (!tokens().revoke(decodedTokenId)) return json(404, "{\"ok\":false,\"error\":\"not_found\",\"code\":\"not_found\"}");
+        clientRevoked(decodedTokenId);
         targetHistoryStore.clear("token:" + decodedTokenId);
         return json(200, "{\"ok\":true}");
     }
@@ -2205,8 +2326,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Match match = findMatch(options, constraint);
         if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
         String targetJson = match.target == null ? "null" : match.target.toJson();
-        ClickResult result = clickMatch(match);
-        match.recycle();
+        ClickResult result;
+        try {
+            result = clickMatch(match);
+        } finally {
+            match.recycle();
+        }
         return json(200, "{\"ok\":" + result.ok + ",\"strategy\":\"" + result.strategy +
                 "\",\"target\":" + targetJson + "}");
     }
@@ -2258,8 +2383,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, clear ? value : match.text + value);
         String targetJson = match.target == null ? "null" : match.target.toJson();
-        boolean ok = match.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-        match.recycle();
+        boolean ok;
+        try {
+            checkControl();
+            ok = controlledNodeAction(match.node, AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        } finally {
+            match.recycle();
+        }
         return json(200, "{\"ok\":" + ok + ",\"target\":" + targetJson + "}");
     }
 
@@ -2408,9 +2538,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         performanceMetrics.beginLaunch(SystemClock.uptimeMillis());
         long dispatchStartedNanos = System.nanoTime();
         try {
-            startActivity(intent);
+            checkControl();
+            controlledStartActivity(intent);
             performanceMetrics.recordLaunchDispatch(System.nanoTime() - dispatchStartedNanos, true);
             return json(200, "{\"ok\":true}");
+        } catch (ControlOwnership.Unavailable e) {
+            throw e;
         } catch (Exception e) {
             performanceMetrics.recordLaunchDispatch(System.nanoTime() - dispatchStartedNanos, false);
             return json(500, "{\"ok\":false,\"error\":\"" + escape(e.getClass().getSimpleName()) + "\"}");
@@ -2430,8 +2563,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
         intent.setComponent(name);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         try {
-            startActivity(intent);
+            checkControl();
+            controlledStartActivity(intent);
             return json(200, "{\"ok\":true}");
+        } catch (ControlOwnership.Unavailable e) {
+            throw e;
         } catch (Exception e) {
             return json(500, "{\"ok\":false,\"error\":\"" + escape(e.getClass().getSimpleName()) + "\"}");
         }
@@ -2479,9 +2615,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
 
         try {
-            startActivity(intent);
+            checkControl();
+            controlledStartActivity(intent);
             return WsCallResult.ok(id,
                     "{\"ok\":true,\"resolved\":true,\"dispatched\":true}", elapsed(started));
+        } catch (ControlOwnership.Unavailable e) {
+            throw e;
         } catch (RuntimeException e) {
             return WsCallResult.error(id, "start_failed", "start_failed", elapsed(started));
         }
@@ -2809,19 +2948,22 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private ClickResult clickMatch(Match match) {
         showPointGesture(match.centerX(), match.centerY());
-        if (match.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+        checkControl();
+        if (controlledNodeAction(match.node, AccessibilityNodeInfo.ACTION_CLICK, null)) {
             return new ClickResult(true, "node");
         }
         AccessibilityNodeInfo parent = match.node.getParent();
         while (parent != null) {
-            if (parent.isClickable()) {
-                if (parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    parent.recycle();
+            AccessibilityNodeInfo next;
+            try {
+                if (parent.isClickable()
+                        && controlledNodeAction(parent, AccessibilityNodeInfo.ACTION_CLICK, null)) {
                     return new ClickResult(true, "clickable_parent");
                 }
+                next = parent.getParent();
+            } finally {
+                parent.recycle();
             }
-            AccessibilityNodeInfo next = parent.getParent();
-            parent.recycle();
             parent = next;
         }
         return new ClickResult(dispatchTap(match.target, match.centerX(), match.centerY()), "tap");
@@ -2838,9 +2980,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (target == null || isGesturePointBlocked(target, x, y)) return false;
         Path path = new Path();
         path.moveTo(x, y);
-        return dispatchGesture(gestureBuilderForTarget(target)
+        checkControl();
+        return controlledDispatch(() -> dispatchGesture(gestureBuilderForTarget(target)
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
-                .build(), null, null);
+                .build(), null, null));
     }
 
     private boolean swipe(TargetRef target, int x1, int y1, int x2, int y2, int duration) {
@@ -2854,9 +2997,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
-        return dispatchGesture(gestureBuilderForTarget(target)
+        checkControl();
+        return controlledDispatch(() -> dispatchGesture(gestureBuilderForTarget(target)
                 .addStroke(new GestureDescription.StrokeDescription(path, 0, Math.max(1, duration)))
-                .build(), null, null);
+                .build(), null, null));
     }
 
     private boolean isGesturePointBlocked(TargetRef target, int x, int y) {
@@ -4188,6 +4332,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (session == null) {
             return;
         }
+        synchronized (wsSessionsLock) {
+            if (!wsSessions.remove(session)) return;
+            activeWsSessions = wsSessions.size();
+        }
         session.closeQuietly();
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay != null) overlay.releaseTaskProgress(session);
@@ -4196,8 +4344,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
             session.targetHistoryContextId = "";
         }
         synchronized (wsSessionsLock) {
-            wsSessions.remove(session);
-            activeWsSessions = wsSessions.size();
+            String contextId = session.sessionTokenId.isEmpty() ? "local" : "token:" + session.sessionTokenId;
+            boolean remaining = false;
+            for (WsSession candidate : wsSessions) {
+                if (!candidate.closed && candidate.sessionTokenId.equals(session.sessionTokenId)) remaining = true;
+            }
+            if (!remaining) controlOwnership.release(contextId);
         }
         refreshConnectionStatusOverlay();
     }
@@ -4216,7 +4368,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 }
             }
         }
-        overlay.setConnected(hasAuthenticatedSession);
+        overlay.setConnected(hasAuthenticatedSession && !controlOwnership.stopped());
     }
 
     private void noteControlActivity(String summary) {
@@ -4308,6 +4460,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private static final class WsSession {
+        final Socket socket;
         final OutputStream out;
         final Object writeLock = new Object();
         volatile boolean authenticated;
@@ -4321,7 +4474,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         volatile long lastDirtySentSeq;
         volatile long lastControlActivityElapsedRealtimeMs;
 
-        WsSession(OutputStream out) {
+        WsSession(Socket socket, OutputStream out) {
+            this.socket = socket;
             this.out = out;
             this.lastControlActivityElapsedRealtimeMs = SystemClock.elapsedRealtime();
         }
@@ -4361,13 +4515,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
 
         void closeQuietly() {
-            synchronized (writeLock) {
-                closed = true;
-                try {
-                    out.flush();
-                } catch (IOException ignored) {
-                }
-            }
+            closed = true;
+            HenyoAccessibilityService.closeQuietly(socket);
         }
     }
 

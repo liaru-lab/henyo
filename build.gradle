@@ -286,8 +286,13 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyControlOwnership"
     dependsOn "verifyHelperTreeOptions"
     dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyWindowTargetResolver", "verifyWindowClientContract", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
+}
+
+tasks.register("verifyControlOwnership", Exec) {
+    commandLine "python", "scripts/verify-control-ownership.py"
 }
 
 tasks.register("dex", Exec) {
