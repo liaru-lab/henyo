@@ -539,37 +539,21 @@ public class HenyoAccessibilityService extends AccessibilityService {
         long receivedNanos = System.nanoTime();
         try (socket) {
             InetAddress sourceAddress = socket.getInetAddress();
-            InputStream in = socket.getInputStream();
-            String line = readHttpLine(in);
-            if (line == null) return;
-
-            String[] parts = line.split(" ");
-            String method = parts.length > 0 ? parts[0] : "GET";
-            String target = parts.length > 1 ? parts[1] : "/";
-            Map<String, String> headers = new HashMap<>();
-            int contentLength = 0;
-            while ((line = readHttpLine(in)) != null && !line.isEmpty()) {
-                int colon = line.indexOf(':');
-                if (colon > 0) {
-                    String name = line.substring(0, colon).trim().toLowerCase(Locale.ROOT);
-                    String value = line.substring(colon + 1).trim();
-                    headers.put(name, value);
-                    if ("content-length".equals(name)) {
-                        try {
-                            contentLength = Integer.parseInt(value);
-                        } catch (NumberFormatException ignored) {
-                        }
-                    }
-                }
+            HttpRequestReader.Request request;
+            try {
+                request = HttpRequestReader.read(socket);
+            } catch (HttpRequestReader.Failure e) {
+                writeHttpResponse(socket.getOutputStream(), json(e.status,
+                        "{\"ok\":false,\"code\":\"" + e.code + "\",\"error\":\"" + e.code
+                                + "\",\"outcome\":\"not_applied\"}"));
+                return;
             }
-            byte[] bodyBytes = new byte[Math.max(0, contentLength)];
-            int read = 0;
-            while (read < bodyBytes.length) {
-                int n = in.read(bodyBytes, read, bodyBytes.length - read);
-                if (n < 0) break;
-                read += n;
-            }
-            String body = new String(bodyBytes, 0, read, StandardCharsets.UTF_8);
+            if (request == null) return;
+            InputStream in = request.input;
+            String method = request.method;
+            String target = request.target;
+            Map<String, String> headers = request.headers;
+            String body = request.body;
 
             RemoteAccessConfig config = RemoteAccessConfig.load(this);
             int sourceClass = new SourceAccessFilter(config.enabled, config.allowedCidrs).classify(sourceAddress);
@@ -1677,19 +1661,6 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private static String pathOnly(String target) {
         int q = target.indexOf('?');
         return q >= 0 ? target.substring(0, q) : target;
-    }
-
-    private String readHttpLine(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int b;
-        boolean sawAny = false;
-        while ((b = in.read()) != -1) {
-            sawAny = true;
-            if (b == '\n') break;
-            if (b != '\r') out.write(b);
-        }
-        if (!sawAny && out.size() == 0) return null;
-        return out.toString(StandardCharsets.UTF_8.name());
     }
 
     private Response route(String method, String target, String body) {

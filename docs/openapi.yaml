@@ -14,6 +14,11 @@ info:
     an uncertain mutation. Rejected Android actions use status 409 rather than
     a successful response containing ok:false.
 
+    HTTP admission requires CRLF framing, at most 8192 bytes per request/header
+    line, 100 header fields, 32768 total header bytes, and a 1048576-byte body.
+    One absolute five-second deadline covers headers and body. Transfer-Encoding
+    and repeated Content-Length are rejected. See docs/http-transport.md.
+
     Remote access is disabled by default. The default listener is
     `127.0.0.1:8765`, which keeps existing Termux-on-device workflows local.
     When remote access is explicitly enabled, the service may bind to a
@@ -885,6 +890,11 @@ components:
         - token_management_permission_required
         - sensitive_ui_permission_required
         - op_failed
+        - malformed_request
+        - request_timeout
+        - request_line_too_large
+        - headers_too_large
+        - body_too_large
     ErrorResponse:
       type: object
       required: [ok, error, code]

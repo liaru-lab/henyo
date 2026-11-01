@@ -286,6 +286,7 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyHttpRequestReader"
     dependsOn "verifyOperationOutcomes"
     dependsOn "verifyScreenshotCallback"
     dependsOn "verifyCaptureCompletion"
@@ -297,6 +298,10 @@ tasks.register("check") {
 
 tasks.register("verifyOperationOutcomes", Exec) {
     commandLine "python", "scripts/verify-operation-outcomes.py"
+}
+
+tasks.register("verifyHttpRequestReader", Exec) {
+    commandLine "python", "scripts/verify-http-request-reader.py"
 }
 
 tasks.register("verifyScreenshotCallback", Exec) {
