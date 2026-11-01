@@ -654,4 +654,4 @@ results are documented in [control-loop performance](docs/control-loop-performan
 
 Experimental [conditional workflows](docs/conditional-workflows.md) can combine a short, bounded search/navigation fragment into one request.
 
-The standalone [on-device d1 evaluation](experiments/d1/README.md) records reproducible local inference results and limits. This experimental worker is outside the APK and is not adopted for production control.
+The standalone [on-device d1 evaluation](experiments/d1/README.md) records reproducible CPU/GPU inference results and limits. This experimental worker is outside the APK and is not adopted for production control.
