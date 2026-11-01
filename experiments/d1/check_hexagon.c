@@ -41,6 +41,7 @@ static T *weight(struct ggml_context *c, int k, int m, enum ggml_type ty,
 static float *compute(ggml_backend_t *backends, T **w, int n, int mode,
                       int *count) {
   setenv("HENYO_D1_PAIR_GLU", mode ? "1" : "0", 1);
+  unsetenv("HENYO_D1_PAIR_MAX_TOKENS");
   unsetenv("HENYO_D1_HMX_M");
   unsetenv("HENYO_D1_HMX_N");
   unsetenv("HENYO_D1_HMX_SCOPE");
@@ -75,6 +76,8 @@ static float *compute(ggml_backend_t *backends, T **w, int n, int mode,
 int main(int argc, char **argv) {
   if (argc != 3)
     return 2;
+  setenv("GGML_HEXAGON_OPFUSION", "1", 1);
+  setenv("GGML_HEXAGON_NHMX", "1", 1);
   ggml_backend_load_all_from_path(argv[1]);
   ggml_backend_load(argv[2]);
   ggml_backend_t backends[] = {ggml_backend_init_by_name("HTPT0", NULL),
