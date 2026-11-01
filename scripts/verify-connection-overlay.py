@@ -52,7 +52,7 @@ require(OVERLAY, "ICON_FOREGROUND", "indicator must use the icon foreground pale
 require(OVERLAY, "postInvalidateOnAnimation", "active gradient must animate")
 require(OVERLAY, "idleAmount", "idle connection state must use the inward edge glow")
 require(OVERLAY, "8_000L", "idle connection glow must breathe slowly")
-require(OVERLAY, "AgentVisualModel.pulse(now)", "active glow must use an event-independent global phase")
+require(OVERLAY, "TargetGlowModel.breath(now)", "active glow must use an event-independent global phase")
 forbid(OVERLAY, "ValueAnimator", "view-local animators would reset phase across detach and restore")
 require(OVERLAY, "onSizeChanged", "indicator shaders must be rebuilt only for geometry changes")
 require(OVERLAY, "rebuildShaders", "indicator shaders must be cached outside frame drawing")
@@ -74,11 +74,11 @@ require(OVERLAY, "setMaxLines(2)", "captions must stay compact")
 require(OVERLAY, "RowLayoutCache", "caption layouts must be cached per message")
 require(OVERLAY, "IdentityHashMap", "caption caches must follow message identity")
 require(OVERLAY, "renderPaint.setAlpha", "caption dimming must use paint alpha")
-require(OVERLAY, "activityShadeShader", "caption region must have a cached bottom navy gradient")
-require(OVERLAY, "Color.argb(232", "bottom edge of the caption shadow must remain dark")
-require(OVERLAY, "new float[]{0f, 0.24f, 0.64f, 1f}", "navy shadow must fade smoothly upward")
-require(OVERLAY, "activityGridPath", "caption grid geometry must be cached")
-require(OVERLAY, "activityGridShader", "caption grid must fade with the lower shadow")
+require(OVERLAY, "PANEL_FILL = Color.rgb(27, 30, 35)", "comments and plan need a neutral surface")
+require(OVERLAY, "ActivityPanelLayout panelLayout", "one measured layout must own the shared surface")
+require(OVERLAY, "panelBorderPaint", "the panel must have a restrained boundary")
+forbid(OVERLAY, "progressActivityShadeShader", "independent gradient lobes must not return")
+forbid(OVERLAY, "activityGridPath", "the panel must not retain the heavy background grid")
 require(OVERLAY, "height - 56f * density", "caption stack must sit closer to the bottom edge")
 require(OVERLAY, "spinnerIndentPx", "spinner must occupy a dedicated indicator column")
 require(OVERLAY, "displayBodyText", "caption body must be laid out separately from the spinner")
@@ -88,7 +88,7 @@ require(OVERLAY, "visualModel.backdropEnvelope(now)", "navy background must use 
 require(OVERLAY, "WindowManager.LayoutParams.MATCH_PARENT,\n                WindowManager.LayoutParams.MATCH_PARENT",
         "scan, glove, backdrop, and captions must share one full-screen canvas")
 activity_draw = OVERLAY.split("protected void onDraw(Canvas canvas)", 2)[2].split(
-    "protected void onSizeChanged", 1
+    "private void drawTargetWindowGlow", 1
 )[0]
 scan_index = activity_draw.index("drawObservationScan")
 glove_index = activity_draw.index("drawGlove")
@@ -140,12 +140,12 @@ require(MODEL, "smoothstep", "terminal caret fades must use eased interpolation"
 forbid(OVERLAY, "saveLayerAlpha", "caption animation must not allocate an offscreen layer per row and frame")
 forbid(OVERLAY, "renderPaint.setStyle(Paint.Style.STROKE)", "bold captions must not retain a dark outline pass")
 forbid(OVERLAY, "activityHaloPaint", "lower navy shadow must not have a separate card halo")
-forbid(OVERLAY, "drawRoundRect(activityPanelRect", "activity treatment must not render as a popup card")
+require(OVERLAY, "drawRoundRect(activityPanelRect", "one rounded surface must sit behind the content")
 forbid(activity_draw, "StaticLayout.Builder", "caption layout must not be built in the per-frame draw loop")
 forbid(activity_draw, "new RadialGradient", "caption glow must not allocate shaders per frame")
 forbid(activity_draw, "new Path", "caption grid must not allocate paths per frame")
 forbid(activity_draw, "BitmapFactory", "glove bitmaps must not decode in the frame loop")
-require(OVERLAY, "removeAttachedView(attachedActivity)", "screenshot suppression must detach captions too")
+require(OVERLAY, "removeActivityView();", "screenshot suppression must detach captions too")
 forbid(OVERLAY, "[入力]", "captions must not include category labels")
 forbid(OVERLAY, "[観察]", "captions must not include category labels")
 
@@ -170,112 +170,15 @@ require(OVERLAY, "drawTaskProgress", "overlay must render task-level progress")
 require(OVERLAY, "drawProgressIcon", "progress roles must use drawn monochrome icons")
 require(OVERLAY, "progressCheckPath", "completed state must use vector check geometry")
 require(OVERLAY, "progressArcRect", "current state must use allocation-free vector arc geometry")
-require(OVERLAY, "float planTop = height - backdropHeightPx + 32f * density;",
-        "plan rows must stay at one fixed Y anchor regardless of caption presence")
-require(OVERLAY,
-        "drawActivityBackground(canvas, backgroundAlpha, progressRows.size(), dynamicShadeTop)",
-        "one background pass must select the progress-active shade")
-require(OVERLAY, "ensureProgressActivityShade(getWidth(), getHeight(), progressRowCount)",
-        "progress shade must be selected by actual bounded row count")
-require(OVERLAY, "float lobeTop = Math.max(0f, planTop - 140f * density);",
-        "local plan lobe must use the chosen clamped 140dp fade-in")
-require(OVERLAY, "float lobeBottom = Math.min(height, planBottom + 48f * density);",
-        "local plan lobe must rejoin the base about 48dp after the last row")
-require(OVERLAY, "Math.max(baseShadeAlpha(y, shadeTop, height),",
-        "combined shader must never darken less than the normal caption curve")
-require(OVERLAY, "progressLobeAlpha(y, lobeTop, planTop, planBottom, lobeBottom)",
-        "combined shader must add only the bounded local plan lobe")
-require(OVERLAY, "if (firstDifference * secondDifference < 0f)",
-        "combined shader must insert every base/lobe intersection")
-require(OVERLAY, "* (-firstDifference) / (secondDifference - firstDifference)",
-        "intersection stop must use exact piecewise-linear zero crossing")
-require(OVERLAY, "return 94f", "local lobe must start from raw alpha 94")
-caption_shader = OVERLAY.split("activityShadeShader = new LinearGradient", 1)[1].split(
-    "progressActivityShadeShader = null", 1
-)[0]
-require(caption_shader, "new float[]{0f, 0.24f, 0.64f, 1f}",
-        "caption-only shader stops must remain unchanged")
-require(OVERLAY, "? progressActivityShadeShader : activityShadeShader",
-        "finishing progress must restore the unchanged caption shader")
-require(OVERLAY, "progressShadeRowCount == rowCount) return;",
-        "progress shader must be cached across unchanged frames")
+require(OVERLAY, "float planTop = panelLayout.planTop;",
+        "plan and captions must use measured non-overlapping geometry")
+require(OVERLAY, "drawActivityBackground(canvas, backgroundAlpha, panelWidth, now)",
+        "one shared background must cover measured content")
+require(OVERLAY, "panelLayout.showPlanSummary",
+        "small viewports must make omitted plan rows explicit")
 if activity_draw.count("drawActivityBackground(") != 1:
-    raise AssertionError("shade selection must use one background draw without progress overdraw")
-background_draw = OVERLAY.split("private void drawActivityBackground", 1)[1].split(
-    "private void drawObservationScan", 1
-)[0]
-if background_draw.count("canvas.drawRect(") != 1:
-    raise AssertionError("progress must reuse the single cached background rectangle")
-forbidden_per_frame = activity_draw
-forbid(forbidden_per_frame, "new LinearGradient",
-       "progress shade must not allocate a shader in the per-frame draw loop")
-lead_dp = 140.0
-plan_top_offset_dp = 32.0
-row_height_dp = 28.0
-fade_span_dp = lead_dp + plan_top_offset_dp
-target_alpha = 94.0
-if not 120.0 <= lead_dp <= 160.0 or fade_span_dp < 120.0:
-    raise AssertionError("progress transparent lead and fade span must stay in the approved range")
-if not 91.0 <= target_alpha <= 96.0:
-    raise AssertionError("local lobe target must stay in the approved initial range")
-for row_count in (1, 4, 7):
-    plan_bottom_dp = plan_top_offset_dp + row_count * row_height_dp
-    lobe_bottom_dp = plan_bottom_dp + 48.0
-    if plan_bottom_dp <= plan_top_offset_dp or lobe_bottom_dp <= plan_bottom_dp:
-        raise AssertionError("local lobe geometry must contain every row and a smooth tail")
-
-
-def base_alpha(y: float, shade_top: float, height: float) -> float:
-    t = max(0.0, min(1.0, (y - shade_top) / max(1.0, height - shade_top)))
-    if t <= 0.24:
-        return 22.0 * t / 0.24
-    if t <= 0.64:
-        return 22.0 + (154.0 - 22.0) * (t - 0.24) / 0.40
-    return 154.0 + (232.0 - 154.0) * (t - 0.64) / 0.36
-
-
-def lobe_alpha(y: float, top: float, plan_top: float,
-               plan_bottom: float, bottom: float) -> float:
-    if y <= top or y >= bottom:
-        return 0.0
-    if y < plan_top:
-        return target_alpha * (y - top) / max(1.0, plan_top - top)
-    if y <= plan_bottom:
-        return target_alpha
-    return target_alpha * (bottom - y) / max(1.0, bottom - plan_bottom)
-
-
-for row_count in (1, 4, 7):
-    height = 946.0
-    shade_top = height - 400.0
-    plan_top = shade_top + plan_top_offset_dp
-    plan_bottom = plan_top + row_count * row_height_dp
-    lobe_top = max(0.0, plan_top - lead_dp)
-    lobe_bottom = min(height, plan_bottom + 48.0)
-    points = sorted(set((lobe_top, shade_top, plan_top, shade_top + 96.0,
-                         plan_bottom, lobe_bottom, shade_top + 256.0, height)))
-    intersections = []
-    for first, second in zip(points, points[1:]):
-        first_difference = (base_alpha(first, shade_top, height)
-                            - lobe_alpha(first, lobe_top, plan_top,
-                                         plan_bottom, lobe_bottom))
-        second_difference = (base_alpha(second, shade_top, height)
-                             - lobe_alpha(second, lobe_top, plan_top,
-                                          plan_bottom, lobe_bottom))
-        if first_difference * second_difference < 0.0:
-            intersections.append(first + (second - first) * (-first_difference)
-                                 / (second_difference - first_difference))
-    points = sorted(set(points + intersections))
-    combined = lambda y: max(base_alpha(y, shade_top, height),
-                             lobe_alpha(y, lobe_top, plan_top,
-                                        plan_bottom, lobe_bottom))
-    for first, second in zip(points, points[1:]):
-        midpoint = (first + second) * 0.5
-        interpolated = (combined(first) + combined(second)) * 0.5
-        if abs(interpolated - combined(midpoint)) > 1e-5:
-            raise AssertionError(
-                f"row {row_count} combined stop midpoint must equal mathematical max"
-            )
+    raise AssertionError("comments and plan must use one shared background pass")
+forbid(activity_draw, "new LinearGradient", "panel rendering must not allocate shaders per frame")
 require(OVERLAY, "TaskProgressModel.KIND_PENDING",
         "pending steps must use a distinct subdued icon")
 require(OVERLAY, "activityModel.removeSummary(progressModel.current())",

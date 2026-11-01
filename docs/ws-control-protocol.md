@@ -243,8 +243,15 @@ only when intentionally replacing the goal, step text, count, or order.
 
 Structured calls require a non-empty goal and cannot include `completed` or
 `current`. Each string is sanitized and bounded to 72 Unicode code points. The
-plan has a fixed presentation anchor independent of per-operation
-`display.summary` captions.
+plan and per-operation `display.summary` captions use measured, non-overlapping
+rows on one neutral translucent surface. Row height follows font scaling; plan
+text uses compact single-line ellipsis. Older comments are omitted before plan
+rows when space is limited. In very small viewports the goal/current step is
+prioritized, with an explicit count of omitted items. Observed keyboard and
+focused-editor bounds move the panel above input controls. Completion text wraps in
+full and reduces its font size only when needed to fit the available safe area.
+If no readable text area remains, the text surface stays hidden while lifecycle
+controls and completion dismissal remain available.
 
 For migration, the legacy complete snapshot remains accepted:
 
@@ -562,8 +569,8 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 | `screen.screenshot` | `GET /v1/screen/screenshot` | `timeout`, `includeIndicator`; optional target fields | Indicator-free targeted PNG metadata/data by default, capture timing, and a screenshot-to-screen coordinate mapping |
 | `termux.exec` | WS only | `commandPath`, `arguments`, `workdir`, `stdin`, `timeout` | Structured bounded stdout/stderr, exit code, Termux internal error, original lengths, and duration |
 | `task.progress.set` | WS only | structured full snapshot: `goal`, ordered `steps[{text,status}]`, optional `replan`; or legacy `goal`, `completed`, `current` | Presentation application acknowledgement; never echoes text |
-| `task.progress.finish` | WS only | none | Idempotent presentation clear acknowledgement |
-| `task.completion.show` | WS only | required `message` string, 1–250 Unicode code points | Replace-only completion presentation acknowledgement; never echoes text |
+| `task.progress.finish` | WS only | none; matching envelope `taskId` required | Complete the task, return control, and briefly present `Completed` |
+| `task.completion.show` | WS only | required `message` string, 1–250 Unicode code points; matching envelope `taskId` | Complete the task and briefly present its final message; never echoes text |
 
 ### Opening an opaque URI
 

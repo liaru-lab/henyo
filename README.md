@@ -227,8 +227,8 @@ chrome when an edge cannot be drawn over directly. Recent activity holds for
 20 seconds and then fades over 1.8 seconds, bridging slower agent pauses
 instead of repeatedly collapsing. The first activation and any fade reversal
 ease into one uptime-based pulse; a new call extends the lease without resetting
-the pulse phase. The lower navy shade shares that lease, so it is already present
-before a caption is drawn and remains when a call has no summary.
+the pulse phase. Presentation does not add an empty text panel to calls without
+comments or a task plan.
 
 Calls and batches may include a short `display.summary`. Up to three natural-
 language summaries appear near the lower-left edge with a brief type-in effect;
@@ -236,12 +236,14 @@ new messages enter below older, dimmer messages. The newest row carries a
 cycling Braille activity spinner and a thin terminal scan-line caret at the
 current reveal position. The caret holds briefly, then eases between bright and
 dim states on a one-second cycle. The spinner occupies its own indicator column
-while all body text aligns beside it. Larger bold off-white text sits in a full-width
-icon-navy shadow that grows darker toward the physical bottom edge and merges
-with the active inner glow; a barely visible technical grid fades upward with
-it. There is no popup-card boundary, separate panel halo, dark text outline, or
-operation-category label. Raw selectors and entered values are never converted
-into a summary automatically.
+while all body text aligns beside it. Comments and the plan share one measured
+translucent charcoal surface with rounded corners, a subtle border, and off-white
+text. The surface follows content height; plan row height follows font scaling.
+Small viewports drop older comments first, then retain the goal/current step and
+show how many other plan items are omitted. Compact plan rows use ellipsis;
+completion text wraps in full and fits the available area. The panel moves above
+the input method when the observed target's visible area is reduced. Raw selectors and
+entered values are never converted into a summary automatically.
 
 Completed multi-step tasks use the separate `task.completion.show` presentation,
 not `display.summary`. It wraps a final message of up to 250 Unicode code points

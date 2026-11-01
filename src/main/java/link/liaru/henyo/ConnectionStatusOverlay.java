@@ -38,7 +38,6 @@ import android.hardware.display.DisplayManager;
 import java.util.List;
 import java.util.IdentityHashMap;
 import java.util.Map;
-import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -318,14 +317,15 @@ final class ConnectionStatusOverlay {
         postVisual(() -> visualModel.beginScan(logicalId, SystemClock.uptimeMillis()));
     }
 
-    void setTargetWindow(int windowId, int displayId, Rect bounds, Region presentationRegion,
+    void setTargetWindow(int windowId, int displayId, Rect bounds, Region presentationRegion, Rect focusedInput,
                          int displayWidth, int displayHeight, float density) {
         Rect boundsCopy = bounds == null ? new Rect() : new Rect(bounds);
         Region regionCopy = presentationRegion == null ? new Region() : new Region(presentationRegion);
+        Rect focusedCopy = focusedInput == null ? new Rect() : new Rect(focusedInput);
         mainHandler.post(() -> {
             if (destroyed) return;
             boolean displayChanged = targetVisualState.displayId != displayId;
-            targetVisualState.set(windowId, displayId, boundsCopy, regionCopy,
+            targetVisualState.set(windowId, displayId, boundsCopy, regionCopy, focusedCopy,
                     displayWidth, displayHeight, density);
             if (displayChanged) {
                 visualCoordinates.clear();
@@ -797,6 +797,8 @@ final class ConnectionStatusOverlay {
     private static final class TargetVisualState {
         final Rect bounds = new Rect();
         final Rect contourBounds = new Rect();
+        final Rect presentationBounds = new Rect();
+        final Rect focusedInputBounds = new Rect();
         final Region presentationRegion = new Region();
         final Path outline = new Path();
         final Path presentationClip = new Path();
@@ -808,17 +810,20 @@ final class ConnectionStatusOverlay {
         long generation;
         boolean valid;
 
-        void set(int newWindowId, int newDisplayId, Rect newBounds, Region newRegion,
+        void set(int newWindowId, int newDisplayId, Rect newBounds, Region newRegion, Rect newFocusedInput,
                  int newDisplayWidth, int newDisplayHeight, float newDensity) {
             if (valid && windowId == newWindowId && displayId == newDisplayId
                     && bounds.equals(newBounds) && presentationRegion.equals(newRegion)
+                    && focusedInputBounds.equals(newFocusedInput)
                     && displayWidth == newDisplayWidth && displayHeight == newDisplayHeight
                     && Float.compare(density, Math.max(0.5f, newDensity)) == 0) return;
             windowId = newWindowId;
             displayId = newDisplayId;
             bounds.set(newBounds);
             presentationRegion.set(newRegion);
-            contourBounds.set(presentationRegion.getBounds());
+            presentationBounds.set(presentationRegion.getBounds());
+            focusedInputBounds.set(newFocusedInput);
+            contourBounds.set(presentationBounds);
             displayWidth = newDisplayWidth;
             displayHeight = newDisplayHeight;
             density = Math.max(0.5f, newDensity);
@@ -843,6 +848,8 @@ final class ConnectionStatusOverlay {
             windowId = -1;
             bounds.setEmpty();
             contourBounds.setEmpty();
+            presentationBounds.setEmpty();
+            focusedInputBounds.setEmpty();
             presentationRegion.setEmpty();
             outline.reset();
             presentationClip.reset();
@@ -1088,25 +1095,27 @@ final class ConnectionStatusOverlay {
 
     /** Bottom-left, touch-through captions describing the agent's current intent. */
     private static final class ActivityView extends View {
-        private static final int TEXT_FILL = Color.rgb(244, 251, 255);
+        private static final int TEXT_FILL = Color.rgb(242, 244, 247);
         private static final int TEXT_GLOW = Color.rgb(0, 241, 239);
-        private static final int BACKGROUND_NAVY = Color.rgb(0, 17, 40);
-        private static final int BACKGROUND_NAVY_LIFTED = Color.rgb(0, 43, 72);
-        private static final long STACK_TRANSITION_MS = 240L;
+        private static final int PANEL_FILL = Color.rgb(27, 30, 35);
         private static final long CAPTION_FRAME_MS = 32L;
-        private static final float COMPLETION_BACKDROP_TOP_FRACTION = 0.42f;
 
         private final AgentActivityModel model;
         private final TaskProgressModel progressModel;
         private final CompletionMessageModel completionModel;
         private final AgentVisualModel visualModel;
         private final VisualCoordinates visualCoordinates;
-        private final int backdropHeightPx;
         private final Runnable emptyCallback;
         private final PerformanceMetrics performanceMetrics;
         private final TextPaint renderPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint activityShadePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint activityGridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint panelBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF activityPanelRect = new RectF();
+        private final ActivityPanelLayout panelLayout = new ActivityPanelLayout();
+        private final int[] captionHeights = new int[AgentActivityModel.MAX_MESSAGES];
+        private final float progressRowHeightPx;
+        private final TextPaint completionPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        private final float baseTextSize;
         private final Paint caretPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint scanGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint scanCorePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1117,7 +1126,6 @@ final class ConnectionStatusOverlay {
         private final Paint targetGlowBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final TextPaint progressPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint progressIconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Path activityGridPath = new Path();
         private final Path progressCheckPath = new Path();
         private final RectF caretRect = new RectF();
         private final RectF progressArcRect = new RectF();
@@ -1130,30 +1138,21 @@ final class ConnectionStatusOverlay {
         private final Bitmap backGloveBitmap;
         private final Map<AgentActivityModel.Message, RowLayoutCache> rowLayouts = new IdentityHashMap<>();
         private final StaticLayout[] visibleFullLayouts = new StaticLayout[AgentActivityModel.MAX_MESSAGES];
-        private final float[] visibleTargetY = new float[AgentActivityModel.MAX_MESSAGES];
         private final float density;
         private final float spinnerIndentPx;
         private final float caretWidthPx;
         private final float caretHeightPx;
         private final int caretSlotWidthPx;
         private int cachedTextWidth = -1;
-        private Shader activityShadeShader;
-        private Shader progressActivityShadeShader;
-        private Shader activityGridShader;
         private Bitmap scanGlowBitmap;
         private int scanBitmapWidth = -1;
         private int scanBitmapHeight = -1;
-        private Shader completionActivityShadeShader;
-        private int progressShadeWidth = -1;
-        private int progressShadeHeight = -1;
-        private int progressShadeRowCount = -1;
-        private int completionShadeWidth = -1;
-        private int completionShadeHeight = -1;
-        private float completionShadeTop = -1f;
         private CompletionMessageModel.Message completionLayoutMessage;
         private int completionLayoutWidth = -1;
+        private int completionLayoutHeight = -1;
         private StaticLayout completionLayout;
-        private long stackTransitionStartedAtMs;
+        private float animatedPanelTop = Float.NaN;
+        private long panelDrawAtMs;
         private long targetShaderGeneration = -1L;
         private long targetGlowBitmapGeneration = -1L;
         private Bitmap targetGlowBitmap;
@@ -1174,18 +1173,21 @@ final class ConnectionStatusOverlay {
             this.visualCoordinates = visualCoordinates;
             this.targetVisualState = targetVisualState;
             this.density = context.getResources().getDisplayMetrics().density;
-            this.backdropHeightPx = Math.max(1, Math.round(400f * this.density));
             this.emptyCallback = emptyCallback;
             this.performanceMetrics = performanceMetrics;
             float scaledDensity = context.getResources().getDisplayMetrics().scaledDensity;
             float textSize = 20f * scaledDensity;
+            baseTextSize = textSize;
             renderPaint.setTextSize(textSize);
             renderPaint.setStrokeJoin(Paint.Join.ROUND);
             renderPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            completionPaint.set(renderPaint);
             progressPaint.setTextSize(16f * scaledDensity);
             progressPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
             progressPaint.setColor(TEXT_FILL);
-            progressIconPaint.setColor(TEXT_GLOW);
+            progressRowHeightPx = Math.max(28f * density,
+                    progressPaint.descent() - progressPaint.ascent() + 8f * density);
+            progressIconPaint.setColor(Color.rgb(171, 190, 205));
             progressIconPaint.setStyle(Paint.Style.STROKE);
             progressIconPaint.setStrokeWidth(Math.max(1.5f, 1.6f * density));
             progressIconPaint.setStrokeCap(Paint.Cap.ROUND);
@@ -1197,9 +1199,8 @@ final class ConnectionStatusOverlay {
             caretPaint.setStyle(Paint.Style.FILL);
             caretPaint.setColor(TEXT_FILL);
             activityShadePaint.setStyle(Paint.Style.FILL);
-            activityGridPaint.setColor(BACKGROUND_NAVY_LIFTED);
-            activityGridPaint.setStyle(Paint.Style.STROKE);
-            activityGridPaint.setStrokeWidth(Math.max(1f, 0.7f * density));
+            panelBorderPaint.setStyle(Paint.Style.STROKE);
+            panelBorderPaint.setStrokeWidth(Math.max(1f, 0.7f * density));
             scanGlowPaint.setStyle(Paint.Style.FILL);
             scanCorePaint.setStrokeWidth(Math.max(1.5f, 2f * density));
             scanCorePaint.setStrokeCap(Paint.Cap.ROUND);
@@ -1217,7 +1218,6 @@ final class ConnectionStatusOverlay {
         }
 
         void noteNewMessage() {
-            stackTransitionStartedAtMs = SystemClock.uptimeMillis();
             emptyCallbackPosted = false;
             running = true;
             invalidate();
@@ -1260,106 +1260,94 @@ final class ConnectionStatusOverlay {
             int height = getHeight();
             drawTargetWindowGlow(canvas, now);
             int left = Math.round(24f * density);
-            int textWidth = Math.max(1, Math.min(width - left * 2, Math.round(width * 0.88f)));
-            StaticLayout fullCompletionLayout = completion == null ? null
-                    : completionLayout(completion, textWidth, now);
-            float completionY = fullCompletionLayout == null ? height
-                    : height - 56f * density - fullCompletionLayout.getHeight();
-            float dynamicShadeTop = fullCompletionLayout == null ? Float.NaN
-                    : Math.max(height * COMPLETION_BACKDROP_TOP_FRACTION,
-                    Math.min(height - backdropHeightPx, completionY - 32f * density));
-            boolean hasPresentation = !messages.isEmpty() || !progressRows.isEmpty()
-                    || completion != null;
-            drawObservationScan(canvas, width, height, now, hasPresentation);
-            AgentVisualModel.CursorFrame cursorFrame = visualModel.cursorFrame(now);
-            drawGlove(canvas, now, cursorFrame);
-            float backgroundAlpha = visualModel.backdropEnvelope(now);
-            if (!progressRows.isEmpty()) backgroundAlpha = Math.max(backgroundAlpha, 0.82f);
-            if (completion != null) {
-                backgroundAlpha = Math.max(backgroundAlpha,
-                        0.92f * CompletionMessageModel.alpha(completion, now));
-            }
-            if (backgroundAlpha > 0f) {
-                drawActivityBackground(canvas, backgroundAlpha, progressRows.size(), dynamicShadeTop);
-            }
-            float planTop = height - backdropHeightPx + 32f * density;
-
-            if (!hasPresentation) {
-                if (!visualModel.isActivityVisible(now) && visualModel.scanPosition(now) < 0f
-                        && cursorFrame == null && !emptyCallbackPosted) {
-                    emptyCallbackPosted = true;
-                    post(emptyCallback);
-                }
-                scheduleNextFrame(now, width, height, cursorFrame, false,
-                        height - backdropHeightPx);
-                performanceMetrics.recordActivityDraw(now, System.nanoTime() - drawStartedNanos);
-                return;
-            }
-            emptyCallbackPosted = false;
-
+            int panelWidth = Math.max(1, Math.min(width - Math.round(24f * density), Math.round(560f * density)));
+            int textWidth = Math.max(1, panelWidth - Math.round(24f * density));
             int bodyWidth = Math.max(1, textWidth - Math.round(spinnerIndentPx));
             if (cachedTextWidth != bodyWidth) {
                 cachedTextWidth = bodyWidth;
                 rowLayouts.clear();
             }
             rowLayouts.keySet().retainAll(messages);
-            float gap = 12f * density;
-            float cursor = height - 56f * density;
-            float transition = Math.min(1f,
-                    Math.max(0f, (now - stackTransitionStartedAtMs) / (float) STACK_TRANSITION_MS));
-
+            for (int i = 0; i < messages.size(); i++) {
+                visibleFullLayouts[i] = cacheFor(messages.get(i), bodyWidth, i == messages.size() - 1).fullLayout;
+                captionHeights[i] = visibleFullLayouts[i].getHeight();
+            }
+            float contentBottom = height - 56f * density;
+            if (targetVisualState.valid && !targetVisualState.presentationBounds.isEmpty()
+                    && targetVisualState.presentationBounds.bottom < height - 120f * density) {
+                // Keep the input method and a smaller target window's bottom controls visible.
+                contentBottom = Math.min(contentBottom,
+                        targetVisualState.presentationBounds.bottom - 20f * density);
+                if (!targetVisualState.focusedInputBounds.isEmpty()) contentBottom = Math.min(contentBottom,
+                        targetVisualState.focusedInputBounds.top - 24f * density);
+            }
+            float minimumTop = Math.min(96f * density, height * 0.3f);
+            int availableHeight = Math.max(1, Math.round(contentBottom - minimumTop));
+            StaticLayout fullCompletionLayout = completion == null || availableHeight < 28f * density ? null
+                    : completionLayout(completion, textWidth, availableHeight, now);
+            if (fullCompletionLayout != null && fullCompletionLayout.getHeight() > availableHeight)
+                fullCompletionLayout = null;
+            float completionY = fullCompletionLayout == null ? contentBottom
+                    : contentBottom - fullCompletionLayout.getHeight();
+            int activePlanRow = 0;
+            for (int i = 0; i < progressRows.size(); i++) {
+                if (progressRows.get(i).kind == TaskProgressModel.KIND_IN_PROGRESS) activePlanRow = i;
+            }
+            panelLayout.measure(minimumTop, contentBottom, 12f * density, 12f * density,
+                    captionHeights, messages.size(), progressRows.size(), activePlanRow, progressRowHeightPx,
+                    fullCompletionLayout == null ? 0 : fullCompletionLayout.getHeight());
+            boolean hasPresentation = !messages.isEmpty() || !progressRows.isEmpty() || completion != null;
+            drawObservationScan(canvas, width, height, now, hasPresentation);
+            AgentVisualModel.CursorFrame cursorFrame = visualModel.cursorFrame(now);
+            drawGlove(canvas, now, cursorFrame);
+            float backgroundAlpha = visualModel.backdropEnvelope(now);
+            if (!progressRows.isEmpty()) backgroundAlpha = 1f;
+            if (completion != null) backgroundAlpha = CompletionMessageModel.alpha(completion, now);
+            if (panelLayout.visible) {
+                drawActivityBackground(canvas, backgroundAlpha, panelWidth, now);
+            }
+            if (!hasPresentation) {
+                if (!visualModel.isActivityVisible(now) && visualModel.scanPosition(now) < 0f
+                        && cursorFrame == null && !emptyCallbackPosted) {
+                    emptyCallbackPosted = true;
+                    post(emptyCallback);
+                }
+                scheduleNextFrame(now, width, height, cursorFrame, false, height);
+                performanceMetrics.recordActivityDraw(now, System.nanoTime() - drawStartedNanos);
+                return;
+            }
+            emptyCallbackPosted = false;
             if (fullCompletionLayout != null) {
                 int saved = canvas.save();
                 canvas.translate(left, completionY);
-                drawCaption(canvas, fullCompletionLayout,
-                        CompletionMessageModel.alpha(completion, now));
+                drawCaption(canvas, fullCompletionLayout, CompletionMessageModel.alpha(completion, now), completionPaint);
                 canvas.restoreToCount(saved);
-            }
-
-            if (!messages.isEmpty()) {
-                for (int i = messages.size() - 1; i >= 0; i--) {
-                    boolean newest = i == messages.size() - 1;
-                    visibleFullLayouts[i] = cacheFor(messages.get(i), bodyWidth, newest).fullLayout;
-                    cursor -= visibleFullLayouts[i].getHeight();
-                    visibleTargetY[i] = cursor;
-                    cursor -= gap;
-                }
-            }
-            float newRowShift = messages.isEmpty() ? 0f
-                    : visibleFullLayouts[messages.size() - 1].getHeight() + gap;
-
-            for (int i = 0; i < messages.size(); i++) {
-                AgentActivityModel.Message message = messages.get(i);
-                int ageRank = messages.size() - 1 - i;
-                boolean newest = ageRank == 0;
-                float alpha = AgentActivityModel.alpha(message, ageRank, now);
-                if (alpha <= 0f) continue;
-                String visible = AgentActivityModel.displayBodyText(message, now, newest);
-                float y = visibleTargetY[i];
-                if (ageRank > 0 && transition < 1f) y += newRowShift * (1f - transition);
-
-                RowLayoutCache cache = cacheFor(message, bodyWidth, newest);
-                StaticLayout visibleLayout = cache.visibleLayout(
-                        visible, renderPaint, bodyWidth, performanceMetrics, now);
-                int saved = canvas.save();
-                canvas.translate(left + spinnerIndentPx, y);
-                drawCaption(canvas, visibleLayout, alpha);
-                if (newest) {
-                    drawCaret(canvas, visibleLayout, visible.length(),
+            } else {
+                for (int i = panelLayout.firstCaption; i < messages.size(); i++) {
+                    AgentActivityModel.Message message = messages.get(i);
+                    int ageRank = messages.size() - 1 - i;
+                    boolean newest = ageRank == 0;
+                    float alpha = AgentActivityModel.alpha(message, ageRank, now);
+                    if (alpha <= 0f) continue;
+                    String visible = AgentActivityModel.displayBodyText(message, now, newest);
+                    float y = panelLayout.captionY[i];
+                    RowLayoutCache cache = cacheFor(message, bodyWidth, newest);
+                    StaticLayout visibleLayout = cache.visibleLayout(
+                            visible, renderPaint, bodyWidth, performanceMetrics, now);
+                    int saved = canvas.save();
+                    canvas.translate(left + spinnerIndentPx, y);
+                    drawCaption(canvas, visibleLayout, alpha);
+                    if (newest) drawCaret(canvas, visibleLayout, visible.length(),
                             alpha * AgentActivityModel.caretAlpha(message, now));
-                }
-                canvas.restoreToCount(saved);
-                if (newest) {
-                    drawSpinner(canvas, AgentActivityModel.spinnerFrame(now), left,
+                    canvas.restoreToCount(saved);
+                    if (newest) drawSpinner(canvas, AgentActivityModel.spinnerFrame(now), left,
                             y + visibleLayout.getLineBaseline(0), alpha);
                 }
+                float planTop = panelLayout.planTop;
+                if (panelLayout.visible) drawTaskProgress(canvas, progressRows, left, textWidth, planTop, now);
             }
-
-            drawTaskProgress(canvas, progressRows, left, textWidth, planTop, now);
-
-            int presentationTop = Float.isNaN(dynamicShadeTop)
-                    ? height - backdropHeightPx : Math.round(dynamicShadeTop);
-            scheduleNextFrame(now, width, height, cursorFrame, hasPresentation, presentationTop);
+            scheduleNextFrame(now, width, height, cursorFrame, hasPresentation,
+                    Math.round(Math.min(panelLayout.top, animatedPanelTop)));
             performanceMetrics.recordActivityDraw(now, System.nanoTime() - drawStartedNanos);
         }
 
@@ -1461,27 +1449,43 @@ final class ConnectionStatusOverlay {
         private void drawTaskProgress(Canvas canvas, List<TaskProgressModel.Row> rows,
                 float left, int availableWidth, float top, long now) {
             if (rows.isEmpty()) return;
-            float rowHeight = 28f * density;
+            float rowHeight = progressRowHeightPx;
             float iconCenterX = left + 9f * density;
             float textLeft = left + 29f * density;
             float textWidth = Math.max(1f, availableWidth - (textLeft - left));
             progressIconPaint.setAlpha(214);
-            if (rows.size() > 1) {
+            if (panelLayout.planCount > 1) {
                 float firstY = top + rowHeight * 0.5f;
-                float lastY = top + (rows.size() - 0.5f) * rowHeight;
+                float lastY = top + (panelLayout.planCount - 0.5f) * rowHeight;
                 progressIconPaint.setAlpha(68);
                 canvas.drawLine(iconCenterX, firstY, iconCenterX, lastY, progressIconPaint);
             }
-            for (int i = 0; i < rows.size(); i++) {
-                TaskProgressModel.Row row = rows.get(i);
+            for (int i = 0; i < panelLayout.planCount; i++) {
+                TaskProgressModel.Row row = rows.get(panelLayout.planIndices[i]);
                 float centerY = top + (i + 0.5f) * rowHeight;
                 drawProgressIcon(canvas, row.kind, iconCenterX, centerY, now);
                 String visible = TaskProgressModel.visibleText(row, now);
+                String overflow = panelLayout.hiddenPlanRows > 0 && !panelLayout.showPlanSummary
+                        ? " +" + panelLayout.hiddenPlanRows : "";
+                float overflowWidth = progressPaint.measureText(overflow);
                 CharSequence fitted = TextUtils.ellipsize(
-                        visible, progressPaint, textWidth, TextUtils.TruncateAt.END);
+                        visible, progressPaint, Math.max(1f, textWidth - overflowWidth), TextUtils.TruncateAt.END);
                 progressPaint.setAlpha(row.kind == TaskProgressModel.KIND_COMPLETED ? 184 : 255);
                 float baseline = centerY - (progressPaint.ascent() + progressPaint.descent()) * 0.5f;
                 canvas.drawText(fitted, 0, fitted.length(), textLeft, baseline, progressPaint);
+                if (!overflow.isEmpty()) canvas.drawText(overflow, textLeft + textWidth - overflowWidth, baseline, progressPaint);
+            }
+            if (panelLayout.showPlanSummary) {
+                progressPaint.setAlpha(184);
+                float centerY = panelLayout.summaryY + rowHeight * 0.5f;
+                float baseline = centerY - (progressPaint.ascent() + progressPaint.descent()) * 0.5f;
+                boolean goalVisible = panelLayout.planCount > 0 && panelLayout.planIndices[0] == 0;
+                String label = goalVisible
+                        ? (panelLayout.hiddenPlanRows == 1 ? " more step" : " more steps")
+                        : (panelLayout.hiddenPlanRows == 1 ? " more item" : " more items");
+                CharSequence summary = TextUtils.ellipsize(panelLayout.hiddenPlanRows + label,
+                        progressPaint, textWidth, TextUtils.TruncateAt.END);
+                canvas.drawText(summary, 0, summary.length(), textLeft, baseline, progressPaint);
             }
         }
 
@@ -1528,162 +1532,31 @@ final class ConnectionStatusOverlay {
                 return;
             }
             if (hasMessages || visualModel.isBackdropAnimating(now)) {
-                int dirtyTop = Math.max(0, Math.min(height - backdropHeightPx, presentationTop));
+                int dirtyTop = Math.max(0, presentationTop - Math.round(8f * density));
                 postInvalidateDelayed(CAPTION_FRAME_MS, 0, dirtyTop, width, height);
             }
         }
 
-        @Override
-        protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
-            super.onSizeChanged(width, height, oldWidth, oldHeight);
-            rebuildActivityBackground(width, height);
-        }
-
-        private void rebuildActivityBackground(int width, int height) {
-            if (width <= 0 || height <= 0) return;
-            float shadeTop = Math.max(0f, height - backdropHeightPx);
-            activityShadeShader = new LinearGradient(0f, shadeTop, 0f, height,
-                    new int[]{
-                            Color.TRANSPARENT,
-                            Color.argb(22, Color.red(BACKGROUND_NAVY), Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY)),
-                            Color.argb(154, Color.red(BACKGROUND_NAVY), Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY)),
-                            Color.argb(232, Color.red(BACKGROUND_NAVY), Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY))
-                    }, new float[]{0f, 0.24f, 0.64f, 1f}, Shader.TileMode.CLAMP);
-            progressActivityShadeShader = null;
-            progressShadeWidth = -1;
-            progressShadeHeight = -1;
-            progressShadeRowCount = -1;
-            completionActivityShadeShader = null;
-            completionShadeWidth = -1;
-            completionShadeHeight = -1;
-            completionShadeTop = -1f;
-            activityGridShader = new LinearGradient(0f, shadeTop, 0f, height,
-                    new int[]{
-                            Color.TRANSPARENT,
-                            Color.TRANSPARENT,
-                            Color.argb(12, Color.red(BACKGROUND_NAVY_LIFTED), Color.green(BACKGROUND_NAVY_LIFTED), Color.blue(BACKGROUND_NAVY_LIFTED)),
-                            Color.argb(28, Color.red(BACKGROUND_NAVY_LIFTED), Color.green(BACKGROUND_NAVY_LIFTED), Color.blue(BACKGROUND_NAVY_LIFTED))
-                    }, new float[]{0f, 0.32f, 0.68f, 1f}, Shader.TileMode.CLAMP);
-            activityGridPaint.setShader(activityGridShader);
-            activityGridPath.reset();
-            float spacing = Math.max(16f, 26f * density);
-            for (float x = 0f; x <= width; x += spacing) {
-                activityGridPath.moveTo(x, shadeTop);
-                activityGridPath.lineTo(x, height);
-            }
-            for (float y = shadeTop; y <= height; y += spacing) {
-                activityGridPath.moveTo(0f, y);
-                activityGridPath.lineTo(width, y);
-            }
-        }
-
-        private void drawActivityBackground(Canvas canvas, float rowAlpha, int progressRowCount,
-                float requestedCompletionShadeTop) {
-            if (activityShadeShader == null) rebuildActivityBackground(getWidth(), getHeight());
-            if (progressRowCount > 0) {
-                ensureProgressActivityShade(getWidth(), getHeight(), progressRowCount);
-            }
-            if (!Float.isNaN(requestedCompletionShadeTop)) {
-                ensureCompletionActivityShade(getWidth(), getHeight(), requestedCompletionShadeTop);
-            }
-            int alpha = Math.max(0, Math.min(255, Math.round(rowAlpha * 255f)));
-            activityShadePaint.setShader(!Float.isNaN(requestedCompletionShadeTop)
-                    ? completionActivityShadeShader
-                    : progressRowCount > 0 ? progressActivityShadeShader : activityShadeShader);
-            activityShadePaint.setAlpha(alpha);
-            canvas.drawRect(0f, 0f, getWidth(), getHeight(), activityShadePaint);
-            activityGridPaint.setAlpha(alpha);
-            canvas.drawPath(activityGridPath, activityGridPaint);
-        }
-
-        private void ensureCompletionActivityShade(int width, int height, float shadeTop) {
-            if (completionActivityShadeShader != null && completionShadeWidth == width
-                    && completionShadeHeight == height
-                    && Math.abs(completionShadeTop - shadeTop) < 0.5f) return;
-            completionActivityShadeShader = new LinearGradient(0f, shadeTop, 0f, height,
-                    new int[]{
-                            Color.TRANSPARENT,
-                            Color.argb(22, Color.red(BACKGROUND_NAVY), Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY)),
-                            Color.argb(154, Color.red(BACKGROUND_NAVY), Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY)),
-                            Color.argb(232, Color.red(BACKGROUND_NAVY), Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY))
-                    }, new float[]{0f, 0.24f, 0.64f, 1f}, Shader.TileMode.CLAMP);
-            completionShadeWidth = width;
-            completionShadeHeight = height;
-            completionShadeTop = shadeTop;
-        }
-
-        private void ensureProgressActivityShade(int width, int height, int rowCount) {
-            if (progressActivityShadeShader != null && progressShadeWidth == width
-                    && progressShadeHeight == height && progressShadeRowCount == rowCount) return;
-            float shadeTop = Math.max(0f, height - backdropHeightPx);
-            float planTop = shadeTop + 32f * density;
-            float planBottom = Math.min(height, planTop + rowCount * 28f * density);
-            float lobeTop = Math.max(0f, planTop - 140f * density);
-            float lobeBottom = Math.min(height, planBottom + 48f * density);
-            float baseSpan = Math.max(1f, height - shadeTop);
-            float[] breakpoints = {
-                    lobeTop, shadeTop, planTop, shadeTop + 0.24f * baseSpan,
-                    planBottom, lobeBottom, shadeTop + 0.64f * baseSpan, height
-            };
-            Arrays.sort(breakpoints);
-            float[] points = new float[breakpoints.length * 2];
-            int count = 0;
-            for (float point : breakpoints) {
-                if (count == 0 || point - points[count - 1] > 0.5f) points[count++] = point;
-            }
-            int breakpointCount = count;
-            for (int i = 0; i + 1 < breakpointCount; i++) {
-                float firstY = points[i];
-                float secondY = points[i + 1];
-                float firstDifference = baseShadeAlpha(firstY, shadeTop, height)
-                        - progressLobeAlpha(firstY, lobeTop, planTop, planBottom, lobeBottom);
-                float secondDifference = baseShadeAlpha(secondY, shadeTop, height)
-                        - progressLobeAlpha(secondY, lobeTop, planTop, planBottom, lobeBottom);
-                if (firstDifference * secondDifference < 0f) {
-                    points[count++] = firstY + (secondY - firstY)
-                            * (-firstDifference) / (secondDifference - firstDifference);
-                }
-            }
-            Arrays.sort(points, 0, count);
-            int uniqueCount = 0;
-            for (int i = 0; i < count; i++) {
-                if (uniqueCount == 0 || points[i] - points[uniqueCount - 1] > 0.5f) {
-                    points[uniqueCount++] = points[i];
-                }
-            }
-            count = uniqueCount;
-            int[] colors = new int[count];
-            float[] stops = new float[count];
-            float shaderSpan = Math.max(1f, height - lobeTop);
-            for (int i = 0; i < count; i++) {
-                float y = points[i];
-                int alpha = Math.round(Math.max(baseShadeAlpha(y, shadeTop, height),
-                        progressLobeAlpha(y, lobeTop, planTop, planBottom, lobeBottom)));
-                colors[i] = Color.argb(alpha, Color.red(BACKGROUND_NAVY),
-                        Color.green(BACKGROUND_NAVY), Color.blue(BACKGROUND_NAVY));
-                stops[i] = Math.max(0f, Math.min(1f, (y - lobeTop) / shaderSpan));
-            }
-            progressActivityShadeShader = new LinearGradient(0f, lobeTop, 0f, height,
-                    colors, stops, Shader.TileMode.CLAMP);
-            progressShadeWidth = width;
-            progressShadeHeight = height;
-            progressShadeRowCount = rowCount;
-        }
-
-        private static float baseShadeAlpha(float y, float shadeTop, float height) {
-            float t = Math.max(0f, Math.min(1f,
-                    (y - shadeTop) / Math.max(1f, height - shadeTop)));
-            if (t <= 0.24f) return mix(0f, 22f, t / 0.24f);
-            if (t <= 0.64f) return mix(22f, 154f, (t - 0.24f) / 0.40f);
-            return mix(154f, 232f, (t - 0.64f) / 0.36f);
-        }
-
-        private static float progressLobeAlpha(float y, float lobeTop, float planTop,
-                float planBottom, float lobeBottom) {
-            if (y <= lobeTop || y >= lobeBottom) return 0f;
-            if (y < planTop) return 94f * (y - lobeTop) / Math.max(1f, planTop - lobeTop);
-            if (y <= planBottom) return 94f;
-            return 94f * (lobeBottom - y) / Math.max(1f, lobeBottom - planBottom);
+        private void drawActivityBackground(Canvas canvas, float rowAlpha, int panelWidth, long now) {
+            float targetTop = panelLayout.top;
+            if (Float.isNaN(animatedPanelTop) || targetTop < animatedPanelTop) animatedPanelTop = targetTop;
+            else animatedPanelTop += (targetTop - animatedPanelTop)
+                    * Math.min(1f, Math.max(0L, now - panelDrawAtMs) / 120f);
+            panelDrawAtMs = now;
+            float radius = 18f * density;
+            float left = 12f * density;
+            float right = left + panelWidth;
+            activityPanelRect.set(left, animatedPanelTop + 3f * density, right, panelLayout.bottom + 3f * density);
+            activityShadePaint.setColor(Color.BLACK);
+            activityShadePaint.setAlpha(Math.round(22f * rowAlpha));
+            canvas.drawRoundRect(activityPanelRect, radius, radius, activityShadePaint);
+            activityPanelRect.set(left, animatedPanelTop, right, panelLayout.bottom);
+            activityShadePaint.setColor(PANEL_FILL);
+            activityShadePaint.setAlpha(Math.round(240f * rowAlpha));
+            canvas.drawRoundRect(activityPanelRect, radius, radius, activityShadePaint);
+            panelBorderPaint.setColor(Color.WHITE);
+            panelBorderPaint.setAlpha(Math.round(30f * rowAlpha));
+            canvas.drawRoundRect(activityPanelRect, radius, radius, panelBorderPaint);
         }
 
         private void drawObservationScan(Canvas canvas, int width, int height, long now,
@@ -1824,19 +1697,27 @@ final class ConnectionStatusOverlay {
         }
 
         private StaticLayout completionLayout(CompletionMessageModel.Message message,
-                int width, long nowMs) {
+                int width, int availableHeight, long nowMs) {
             if (completionLayout == null || completionLayoutMessage != message
-                    || completionLayoutWidth != width) {
+                    || completionLayoutWidth != width || completionLayoutHeight != availableHeight) {
                 long startedNanos = System.nanoTime();
-                completionLayout = StaticLayout.Builder.obtain(
-                                message.text, 0, message.text.length(), renderPaint, width)
-                        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                        .setIncludePad(false)
-                        .setLineSpacing(0f, 1.18f)
-                        .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
-                        .build();
+                completionPaint.setTextSize(baseTextSize);
+                for (int attempt = 0; attempt < 6; attempt++) {
+                    completionLayout = StaticLayout.Builder.obtain(
+                                    message.text, 0, message.text.length(), completionPaint, width)
+                            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                            .setIncludePad(false)
+                            .setLineSpacing(0f, 1.18f)
+                            .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
+                            .build();
+                    if (completionLayout.getHeight() <= availableHeight || attempt == 5) break;
+                    completionPaint.setTextSize(Math.max(8f * density,
+                            completionPaint.getTextSize() * (float) Math.sqrt(availableHeight
+                                    / (double) completionLayout.getHeight()) * 0.94f));
+                }
                 completionLayoutMessage = message;
                 completionLayoutWidth = width;
+                completionLayoutHeight = availableHeight;
                 performanceMetrics.recordStaticLayout(
                         nowMs, System.nanoTime() - startedNanos);
             }
@@ -1844,21 +1725,14 @@ final class ConnectionStatusOverlay {
         }
 
         private void drawCaption(Canvas canvas, StaticLayout layout, float rowAlpha) {
-            int alpha = Math.max(0, Math.min(255, Math.round(rowAlpha * 255f)));
+            drawCaption(canvas, layout, rowAlpha, renderPaint);
+        }
 
-            renderPaint.setStyle(Paint.Style.FILL);
-            renderPaint.setStrokeWidth(0f);
-            renderPaint.setColor(TEXT_FILL);
-            renderPaint.setAlpha(Math.round(alpha * (58f / 255f)));
-            renderPaint.setShadowLayer(3f * density, 0f, 0f,
-                    Color.argb(Math.round(rowAlpha * 72f), Color.red(TEXT_GLOW), Color.green(TEXT_GLOW), Color.blue(TEXT_GLOW)));
-            layout.draw(canvas);
-            renderPaint.clearShadowLayer();
-
-            renderPaint.setStyle(Paint.Style.FILL);
-            renderPaint.setStrokeWidth(0f);
-            renderPaint.setColor(TEXT_FILL);
-            renderPaint.setAlpha(alpha);
+        private void drawCaption(Canvas canvas, StaticLayout layout, float rowAlpha, TextPaint paint) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(TEXT_FILL);
+            paint.setAlpha(Math.max(0, Math.min(255, Math.round(rowAlpha * 255f))));
+            paint.clearShadowLayer();
             layout.draw(canvas);
         }
 

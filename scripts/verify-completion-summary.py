@@ -161,10 +161,10 @@ def verify_contract_and_rendering() -> None:
     forbid(completion_layout, "setMaxLines", "completion layout must never cap lines")
     forbid(completion_layout, "spinner", "completion layout must not add a spinner")
     forbid(completion_layout, "caret", "completion layout must not add a caret")
-    require(OVERLAY, "COMPLETION_BACKDROP_TOP_FRACTION = 0.42f",
-            "completion backdrop must be bounded to the lower 58% of the display")
-    require(OVERLAY, "Math.min(height - backdropHeightPx, completionY - 32f * density)",
-            "completion backdrop must expand upward with wrapped layout height")
+    require(OVERLAY, "completionLayout(completion, textWidth, availableHeight, now)",
+            "completion must fit the measured safe area")
+    require(OVERLAY, "completionLayoutHeight != availableHeight",
+            "completion wrapping must update when display height changes")
 
     # Conservative supported-target geometry: 1080x2412 at density/scaledDensity
     # 2.55. Assume a wide glyph is 1.2em and each line consumes 1.18em.
