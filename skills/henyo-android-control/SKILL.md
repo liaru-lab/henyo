@@ -597,3 +597,6 @@ bin/henyo tree 3
 
 Store screenshots as artifacts/paths and describe the relevant UI state instead
 of embedding or transcribing sensitive content by default.
+
+
+For a short, predefined fragment, discover `conditionalWorkflows` and use `henyo workflow run FILE` only with a fresh exact target. Read `docs/conditional-workflows.md` for limits. Treat unknown predicates as uncertainty. Preserve partial error results, observe fresh UI after failure, and never automatically replay the entire workflow. Stop/resume invalidates the original workflow ticket. Complete the overall task explicitly after verification.

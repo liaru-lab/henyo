@@ -103,6 +103,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final ThreadLocal<Long> requestControlTicket = new ThreadLocal<>();
     private final ThreadLocal<OperationDeadline> requestDeadline = new ThreadLocal<>();
     private final ThreadLocal<Runnable> requestVisualCue = new ThreadLocal<>();
+    private final ThreadLocal<ConditionalWorkflow.Target> requestWorkflowTarget = new ThreadLocal<>();
     private final ThreadLocal<String> requestTaskId = new ThreadLocal<>();
     private final TaskLifecycle taskLifecycle = new TaskLifecycle();
     private final ThreadLocal<Boolean> requestSensitiveGrant = ThreadLocal.withInitial(() -> false);
@@ -464,6 +465,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                             || !expectedPackage.equals(str(root.getPackageName())))
                         throw new OperationFailure("stale_target", 409, "not_applied");
                     requireRootAccess(root);
+                    requireWorkflowNodePoint(node, windows, window, root);
                 } finally { root.recycle(); }
                 return controlledDispatch(() -> node.performAction(action, arguments));
             }
@@ -1016,6 +1018,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             noteControlActivity("");
             return WsCallResult.ok(id, "{\"ok\":true,\"taskId\":\"" + escape(taskId) + "\"}", elapsed(started));
         }
+        if (WsOperation.OP_WORKFLOW_RUN.equals(spec.op)) return executeWorkflow(session, id, paramsJson, started);
         if (("POST".equals(spec.httpMethod) && !WsOperation.OP_UI_FIND.equals(spec.op)
                 && !WsOperation.OP_UI_WAIT.equals(spec.op)) || WsOperation.OP_TERMUX_EXEC.equals(spec.op)
                 || WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)) checkControl();
@@ -1175,6 +1178,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
             sendWsError(session, id, "op_invalid", "Batch requires at least one step");
             return;
         }
+        for (String step : steps) {
+            if (WsOperation.OP_WORKFLOW_RUN.equals(WsOperation.normalizeOp(parseJsonObject(step).get("op")))) {
+                sendWsError(session, id, "workflow_in_batch", "Workflows require a standalone call");
+                return;
+            }
+        }
         noteControlActivity(displaySummary(frameText));
         StringBuilder stepJson = new StringBuilder("[");
         boolean stopped = false;
@@ -1248,6 +1257,122 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return verification;
     }
 
+    private OperationTargetConstraint workflowConstraint(OperationTargetConstraint requested) {
+        ConditionalWorkflow.Target target = requestWorkflowTarget.get();
+        if (target == null) return requested;
+        OperationTargetConstraint value = requested == null ? OperationTargetConstraint.none() : requested;
+        if (!value.valid || (value.hasPackage() && !target.packageName.equals(value.packageName))
+                || (value.hasWindow() && value.windowId != target.windowId)
+                || (value.hasDisplay() && value.displayId != target.displayId))
+            throw new OperationFailure("workflow_target_changed", 409, "not_applied");
+        // A window-only constraint is a hard pin; package-based recreation fallback is disabled.
+        return OperationTargetConstraint.exact("", target.windowId, target.displayId);
+    }
+
+    private void requireWorkflowRoot(AccessibilityNodeInfo root) {
+        ConditionalWorkflow.Target target = requestWorkflowTarget.get();
+        if (target == null) return;
+        if (root == null || root.getWindowId() != target.windowId
+                || !target.packageName.equals(str(root.getPackageName())))
+            throw new OperationFailure("workflow_target_changed", 409, "not_applied");
+        AccessibilityWindowInfo window = root.getWindow();
+        try {
+            if (window == null || (!window.isActive() && !window.isFocused())
+                    || (Build.VERSION.SDK_INT >= 30 ? window.getDisplayId() : Display.DEFAULT_DISPLAY) != target.displayId)
+                throw new OperationFailure("workflow_target_changed", 409, "not_applied");
+        } finally { if (window != null) window.recycle(); }
+    }
+
+    private void requireWorkflowNodePoint(AccessibilityNodeInfo node, List<AccessibilityWindowInfo> windows,
+                                          AccessibilityWindowInfo window, AccessibilityNodeInfo root) {
+        if (requestWorkflowTarget.get() == null) return;
+        Rect point = new Rect(); node.getBoundsInScreen(point);
+        int index = windows.indexOf(window);
+        if (index < 0 || point.isEmpty() || !node.isVisibleToUser()
+                || !targetSnapshot(windows, index, root, str(root.getPackageName())).actionableRegion
+                        .contains(point.centerX(), point.centerY()))
+            throw new OperationFailure("workflow_target_changed", 409, "not_applied");
+    }
+
+    private WsCallResult executeWorkflow(WsSession session, String id, String paramsJson, long started) {
+        ConditionalWorkflow.Plan plan;
+        try { plan = WorkflowJson.parse(paramsJson); }
+        catch (org.json.JSONException | IllegalArgumentException invalid) {
+            return WsCallResult.failure(id, "workflow_invalid", "not_applied", elapsed(started));
+        }
+        if (requestTaskId.get() == null || requestTaskId.get().isEmpty())
+            return WsCallResult.failure(id, "task_id_required", "not_applied", elapsed(started));
+        ConditionalWorkflow.Target previousTarget = requestWorkflowTarget.get();
+        OperationDeadline previousDeadline = requestDeadline.get();
+        try {
+            requestWorkflowTarget.set(plan.target);
+            requestDeadline.set(previousDeadline == null ? new OperationDeadline(System.nanoTime(), plan.budgetMs)
+                    : previousDeadline.limitedFrom(System.nanoTime(), plan.budgetMs));
+            checkControl();
+            noteControlActivity("");
+            ConditionalWorkflow.Adapter adapter = new ConditionalWorkflow.Adapter() {
+                public void checkCurrent() {
+                    try { checkControl(); }
+                    catch (ControlOwnership.Unavailable unavailable) {
+                        throw new OperationFailure(unavailable.code, 409, "not_applied");
+                    }
+                }
+                public long nowMs() { return SystemClock.elapsedRealtime(); }
+                public void pause(long millis) throws InterruptedException { Thread.sleep(millis); }
+                public ConditionalWorkflow.Presence probe(ConditionalWorkflow.Target target, ConditionalWorkflow.Selector selector) {
+                    long begin;
+                    synchronized (uiTreeStateLock) { begin = uiEventSeq; }
+                    TargetSnapshot snapshot = resolveTarget(OperationTargetConstraint.none(), true);
+                    if (snapshot == null) return ConditionalWorkflow.Presence.UNKNOWN;
+                    try {
+                        SearchOptions query = new SearchOptions(selector.text.toLowerCase(Locale.ROOT), true, selector.field, false, true);
+                        ConditionalWorkflow.Presence presence = WorkflowPredicateProbe.probe(snapshot.root,
+                                new WorkflowPredicateProbe.Access<AccessibilityNodeInfo>() {
+                            public boolean matches(AccessibilityNodeInfo node) {
+                                checkCurrent();
+                                if (!node.isVisibleToUser() || !nodeMatches(node, query)) return false;
+                                Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
+                                if (bounds.isEmpty() || !snapshot.actionableRegion.contains(bounds.centerX(), bounds.centerY()))
+                                    throw new IllegalStateException("occluded predicate");
+                                return true;
+                            }
+                            public int childCount(AccessibilityNodeInfo node) { return node.getChildCount(); }
+                            public AccessibilityNodeInfo child(AccessibilityNodeInfo node, int index) { return node.getChild(index); }
+                            public void recycle(AccessibilityNodeInfo node) { node.recycle(); }
+                        });
+                        synchronized (uiTreeStateLock) { if (uiEventSeq != begin) return ConditionalWorkflow.Presence.UNKNOWN; }
+                        return presence;
+                    } finally { snapshot.root.recycle(); }
+                }
+                public ConditionalWorkflow.ActionResult act(ConditionalWorkflow.Target target, ConditionalWorkflow.Action action) {
+                    boolean prior = requestMutationAccepted.get();
+                    requestMutationAccepted.set(false);
+                    try {
+                        org.json.JSONObject params = new org.json.JSONObject(action.paramsJson);
+                        params.put("package", target.packageName); params.put("windowId", target.windowId); params.put("displayId", target.displayId);
+                        org.json.JSONObject frame = new org.json.JSONObject(); frame.put("params", params);
+                        WsCallResult result = executeWsCallInContext(session, "workflow-step", action.op, frame.toString());
+                        return new ConditionalWorkflow.ActionResult(result.ok,
+                                requestMutationAccepted.get() || "unknown".equals(result.outcome), result.code);
+                    } catch (ControlOwnership.Unavailable unavailable) {
+                        return new ConditionalWorkflow.ActionResult(false, requestMutationAccepted.get(), unavailable.code);
+                    } catch (OperationFailure failure) {
+                        return new ConditionalWorkflow.ActionResult(false,
+                                requestMutationAccepted.get() || "unknown".equals(failure.outcome), failure.code);
+                    } catch (org.json.JSONException invalid) {
+                        return new ConditionalWorkflow.ActionResult(false, false, "workflow_invalid");
+                    } catch (RuntimeException failure) {
+                        return new ConditionalWorkflow.ActionResult(false, requestMutationAccepted.get(), "op_failed");
+                    } finally { requestMutationAccepted.set(prior || requestMutationAccepted.get()); }
+                }
+            };
+            return WsCallResult.workflow(id, new ConditionalWorkflow(plan, adapter).run(), elapsed(started));
+        } finally {
+            if (previousTarget == null) requestWorkflowTarget.remove(); else requestWorkflowTarget.set(previousTarget);
+            if (previousDeadline == null) requestDeadline.remove(); else requestDeadline.set(previousDeadline);
+        }
+    }
+
     private SensitiveTreeInspector.Result inspectSensitiveRoot(AccessibilityNodeInfo root) {
         if (root == null) return SensitiveTreeInspector.Result.UNKNOWN;
         if (Build.VERSION.SDK_INT < 34) return SensitiveTreeInspector.Result.CLEAR;
@@ -1260,6 +1385,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private SensitiveTreeInspector.Result requireRootAccess(AccessibilityNodeInfo root) {
+        requireWorkflowRoot(root);
         String token = requestBearerToken.get();
         if (token == null || token.isEmpty()) return null;
         requireScope(token, BearerTokenManager.SCOPE_CONTROL, "control_permission_required");
@@ -2085,14 +2211,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private static String capabilitiesJson() {
-        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\"");
+        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\",\"conditionalWorkflows\"");
         if (Build.VERSION.SDK_INT >= 30) {
             features.append(",\"displayTargeting\",\"displayCapture\",\"screenshotCoordinates\"");
         }
         if (Build.VERSION.SDK_INT >= 34) features.append(",\"windowCapture\"");
         features.append("]");
         return "{\"profile\":\"" + CAPABILITY_PROFILE + "\",\"features\":" + features +
-                ",\"limits\":{},\"operations\":{}}";
+                ",\"limits\":{},\"operations\":{\"workflow.run\":{\"mutates\":true,\"experimental\":true,\"maxSteps\":16,\"maxDepth\":2,\"maxBudgetMs\":5000}}}";
     }
 
     private Response remoteAccessStatus() {
@@ -2287,6 +2413,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private TargetSnapshot resolveTarget(OperationTargetConstraint constraint, boolean remember) {
+        constraint = workflowConstraint(constraint);
         long started = System.nanoTime();
         try { return resolveTargetMeasured(constraint, remember); }
         finally { performanceMetrics.phases.record(PhaseTimings.Phase.TARGET_RESOLUTION, System.nanoTime() - started); }
@@ -3498,6 +3625,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private static final int MATCH_EDITABLE = 1;
 
     private Match findAcrossWindows(SearchOptions options, OperationTargetConstraint constraint, int mode) {
+        constraint = workflowConstraint(constraint);
         List<AccessibilityWindowInfo> windows = allWindows();
         if (windows.isEmpty()) throw new OperationFailure("tree_unavailable", 503, "not_applied");
         SearchCoverage coverage = new SearchCoverage();
@@ -4951,6 +5079,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
             return new WsCallResult(id, false, "{}", code, code, durationMs, outcome);
         }
 
+        static WsCallResult workflow(String id, ConditionalWorkflow.Result result, long durationMs) {
+            return new WsCallResult(id, result.completed(), result.toJson(), result.code, result.code, durationMs,
+                    result.completed() ? "" : result.outcome());
+        }
+
+        private String partialResultJson() { return "{}".equals(resultJson) ? "" : ",\"result\":" + resultJson; }
+
         private String outcomeJson() {
             return outcome.isEmpty() ? "" : ",\"outcome\":\"" + escape(outcome) + "\"";
         }
@@ -4961,7 +5096,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         resultJson + ",\"durationMs\":" + durationMs + "}";
             }
             return "{\"type\":\"error\",\"id\":\"" + escape(id) + "\",\"ok\":false,\"code\":\"" +
-                    escape(code) + "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + outcomeJson() + "}";
+                    escape(code) + "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + outcomeJson() + partialResultJson() + "}";
         }
 
         String toStepJson() {
@@ -4970,7 +5105,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         ",\"durationMs\":" + durationMs + "}";
             }
             return "{\"id\":\"" + escape(id) + "\",\"ok\":false,\"code\":\"" + escape(code) +
-                    "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + outcomeJson() + "}";
+                    "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + outcomeJson() + partialResultJson() + "}";
         }
     }
 

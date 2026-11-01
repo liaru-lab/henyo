@@ -286,6 +286,7 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyConditionalWorkflow"
     dependsOn "verifyTargetAccess"
     dependsOn "verifyControlLatency", "verifyGestureGuard", "verifyPerformanceMetrics"
     dependsOn "verifyObservationEffects", "verifyAgentVisualModel"
@@ -465,4 +466,9 @@ tasks.register("verifyGestureGuard", Exec) {
 
 tasks.register("verifyTargetAccess", Exec) {
     commandLine "python", "scripts/verify-target-access.py"
+}
+
+
+tasks.register("verifyConditionalWorkflow", Exec) {
+    commandLine "python", "scripts/verify-conditional-workflow.py"
 }

@@ -279,6 +279,16 @@ def main():
     assert closing.cache["sessionMetadata"] is None
 
     assert helper.helper_read_timeout({"cmd": "session.status"}) >= 45.0
+    workflow = {"mutates": True, "experimental": True, "maxSteps": 16, "maxDepth": 2, "maxBudgetMs": 5000}
+    assert helper.sanitize_operation_capability("workflow.run", workflow) == workflow
+    for key in workflow:
+        invalid = dict(workflow); invalid[key] = "invalid"
+        try:
+            helper.sanitize_operation_capability("workflow.run", invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid workflow capability accepted")
     print("helper session status verifier passed")
 
 
