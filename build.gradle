@@ -286,11 +286,16 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyScreenshotCallback"
     dependsOn "verifyCaptureCompletion"
     dependsOn "verifyControlOwnership"
     dependsOn "verifyAgentActivityModel"
     dependsOn "verifyHelperTreeOptions"
     dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyWindowTargetResolver", "verifyWindowClientContract", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
+}
+
+tasks.register("verifyScreenshotCallback", Exec) {
+    commandLine "python", "scripts/verify-screenshot-callback.py"
 }
 
 tasks.register("verifyCaptureCompletion", Exec) {
