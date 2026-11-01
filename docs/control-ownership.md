@@ -1,5 +1,19 @@
 # Control ownership
 
+Normal completion uses `task.progress.finish` or `task.completion.show` with the
+current task ID. It releases ownership while leaving the connection open,
+clears the task's comments/plan/cursor/glow, and briefly presents `Completed` or
+the supplied message with `Dismiss`. The message disappears after about three
+seconds. Dismiss changes presentation only; Stop cancels authorization for
+further dispatches. Disconnect releases ownership without claiming successful
+completion. Operation failure leaves the task active until finish or stop.
+
+The helper manages unique ephemeral task IDs automatically. Raw clients must
+attach a fresh `taskId` to each new task's mutations/progress and use it for
+completion. A stale completion cannot release newer work, and a new task
+invalidates old presentation callbacks. Completion also invalidates work queued
+under the previous control ticket; a transport timeout does not authorize replay.
+
 A connected client is not necessarily the control owner. The first accepted
 mutation or task presentation claims control for that client identity. Other
 clients receive `control_owned` until ownership is released. Local clients

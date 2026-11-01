@@ -26,8 +26,10 @@ for op in ("task.progress.set", "task.progress.finish"):
     require(PROTOCOL, op, f"{op} must be documented")
 
 require(SERVICE, "setTaskProgress(session", "progress must be owned by its WS session")
-require(SERVICE, "clearTaskProgress(session, false)",
-        "finish must clear only session-owned progress")
+require(SERVICE, "TaskLifecycle.Token completed = finishCurrentTask();",
+        "finish must validate the completing task before releasing control")
+require(SERVICE, 'overlay.completeTask("Completed", completed, presentationGuard(completed))',
+        "finish must guard presentation against newer work")
 require(SERVICE, "releaseTaskProgress(session)",
         "disconnect must release session-owned progress without replay")
 require(SERVICE, "Progress set requires goal, completed, or current",
@@ -67,8 +69,8 @@ if '"progress"' in HELPER.split("self.cache: Dict[str, Any] =", 1)[1].split("}",
 
 for marker in (
     "plan_region", "caption_region", "planRemovedImmediatelyRatio",
-    "captionRemainedAfterFinish", "captionRetainedFromBaselineRatio",
-    "captionAnchorShiftPx", "statusAnchorShiftPx", "time.sleep(0.15)",
+    '"captionRemainedAfterFinish": False', "captionRetainedFromBaselineRatio",
+    "captionAnchorShiftPx", "statusAnchorShiftPx", '"controlReleasedAfterFinish": True',
     "planBackgroundModeledNavy", "captionBackgroundModeledNavy",
     "backgroundModeledNavyRatio", "planBackgroundRegion",
     "captionBackgroundRegion", "sameConditionAdbComparison",

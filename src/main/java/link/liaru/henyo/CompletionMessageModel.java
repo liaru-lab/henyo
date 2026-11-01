@@ -7,8 +7,8 @@ final class CompletionMessageModel {
     static final int SHOW_ACCEPTED = 1;
     static final int SHOW_TOO_LONG = -1;
     static final int SHOW_PROGRESS_ACTIVE = -2;
-    static final long MESSAGE_HOLD_MS = 30_000L;
-    static final long MESSAGE_FADE_OUT_MS = 1_800L;
+    static final long MESSAGE_HOLD_MS = 2_500L;
+    static final long MESSAGE_FADE_OUT_MS = 500L;
     static final long MESSAGE_FADE_IN_MS = 180L;
 
     static final class Message {

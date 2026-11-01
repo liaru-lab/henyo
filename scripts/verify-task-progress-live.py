@@ -490,7 +490,9 @@ def main() -> None:
             finish = result_payload(ipc({"cmd": "progress.finish"}))
             if finish.get("cleared") is not True:
                 raise AssertionError("progress finish did not clear active state")
-            time.sleep(0.15)
+            if finish.get("controlState") != "available":
+                raise AssertionError("completion did not return control")
+            time.sleep(3.5)
             finished_with_caption = capture_pair(directory, "finished-with-caption")
             plan_removed_ratio = changed_ratio(
                 status_updated["indicator"], finished_with_caption["indicator"],
@@ -502,8 +504,8 @@ def main() -> None:
                 finished_with_caption["indicator"], finished_with_caption["clean"],
                 width, caption_region, 8,
             )
-            if caption_remaining_ratio < 0.01:
-                raise AssertionError("controlled caption did not remain immediately after finish")
+            if caption_remaining_ratio > 0.01:
+                raise AssertionError("completion left persistent caption presentation")
             caption_finish_change_ratio = changed_ratio(
                 status_updated["indicator"], finished_with_caption["indicator"],
                 width, caption_region, 8,
@@ -512,10 +514,6 @@ def main() -> None:
                 without_caption["indicator"], finished_with_caption["indicator"],
                 width, caption_region, 8,
             )
-            if caption_retained_from_baseline_ratio < 0.001:
-                raise AssertionError("caption region returned to its no-caption baseline after finish")
-            if caption_finish_change_ratio >= plan_removed_ratio:
-                raise AssertionError("finishing the plan unexpectedly removed the caption region")
 
             result_payload(ipc({
                 "cmd": "progress.set",
@@ -540,7 +538,11 @@ def main() -> None:
             }))
             restart_helper_disconnected()
             reconnect_finish = result_payload(ipc({"cmd": "progress.finish"}))
-            if reconnect_finish.get("cleared") is not False:
+            if reconnect_finish.get("controlState") != "available":
+                raise AssertionError("reconnected task did not return control")
+            time.sleep(3.5)
+            reconnected = capture_pair(directory, "reconnected-completed")
+            if changed_ratio(reconnected["indicator"], reconnected["clean"], width, plan_region, 8) > 0.01:
                 raise AssertionError("task progress was replayed after reconnect")
     finally:
         status = restart_helper_disconnected()
@@ -588,7 +590,8 @@ def main() -> None:
         "captionAnchorShiftPx": caption_anchor_shift,
         "statusAnchorShiftPx": status_anchor_shift,
         "finishCleared": True,
-        "captionRemainedAfterFinish": True,
+        "captionRemainedAfterFinish": False,
+        "controlReleasedAfterFinish": True,
         "statusUpdateApplied": True,
         "mismatchRejected": True,
         "explicitReplanApplied": True,

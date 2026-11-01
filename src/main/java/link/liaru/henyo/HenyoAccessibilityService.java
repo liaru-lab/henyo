@@ -102,6 +102,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final ThreadLocal<String> requestTargetContextId = new ThreadLocal<>();
     private final ThreadLocal<Long> requestControlTicket = new ThreadLocal<>();
     private final ThreadLocal<OperationDeadline> requestDeadline = new ThreadLocal<>();
+    private final ThreadLocal<String> requestTaskId = new ThreadLocal<>();
+    private final TaskLifecycle taskLifecycle = new TaskLifecycle();
     private final ThreadLocal<Boolean> requestMutationAccepted = ThreadLocal.withInitial(() -> false);
     private ControlOwnership controlOwnership;
     private final PerformanceMetrics performanceMetrics = new PerformanceMetrics();
@@ -288,8 +290,11 @@ public class HenyoAccessibilityService extends AccessibilityService {
     static void setControlStopped(Context context, boolean stopped) {
         HenyoAccessibilityService service = instance;
         if (service != null && service.controlOwnership != null) {
-            if (stopped) service.controlOwnership.stop();
-            else service.controlOwnership.resume();
+            synchronized (service.controlOwnership) {
+                if (stopped) service.controlOwnership.stop();
+                else service.controlOwnership.resume();
+                service.taskLifecycle.invalidate(null);
+            }
         }
         context.getSharedPreferences("control", MODE_PRIVATE).edit().putBoolean("stopped", stopped).apply();
         if (service != null) service.updateControlPresentation();
@@ -315,7 +320,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
             throw new ControlOwnership.Unavailable("auth_revoked");
         }
         boolean wasAvailable = controlOwnership.owner().isEmpty();
-        controlOwnership.check(ticket, currentTargetContextId());
+        synchronized (controlOwnership) {
+            String taskId = requestTaskId.get();
+            if (taskId == null || taskId.isEmpty()) taskId = "legacy:" + currentTargetContextId();
+            if (taskLifecycle.completed(currentTargetContextId(), taskId))
+                throw new OperationFailure("stale_task", 409, "not_applied");
+            controlOwnership.check(ticket, currentTargetContextId());
+            taskLifecycle.start(currentTargetContextId(), taskId);
+        }
         if (wasAvailable) ControlActionReceiver.updateNotification(this, controlOwnership.stopped());
     }
 
@@ -323,6 +335,47 @@ public class HenyoAccessibilityService extends AccessibilityService {
         OperationDeadline deadline = requestDeadline.get();
         if (deadline != null && deadline.expired(System.nanoTime()))
             throw new OperationFailure("deadline_exceeded", 408, "not_applied");
+    }
+
+    private static String taskIdFor(Map<String, String> envelope) {
+        if (!envelope.containsKey("taskId")) return "";
+        String id = envelope.get("taskId");
+        if (!TaskLifecycle.validId(id)) throw new OperationFailure("task_id_invalid", 400, "not_applied");
+        return id;
+    }
+
+    private TaskLifecycle.Token finishCurrentTask() {
+        String owner = currentTargetContextId();
+        String id = requestTaskId.get();
+        if (id == null || id.isEmpty()) throw new OperationFailure("task_id_required", 400, "not_applied");
+        synchronized (controlOwnership) {
+            checkDeadline();
+            Long ticket = requestControlTicket.get();
+            if (ticket == null || !controlOwnership.isCurrent(ticket, owner))
+                throw new ControlOwnership.Unavailable(controlOwnership.stopped()
+                        || ticket == null || ticket != controlOwnership.ticket() ? "control_stopped" : "control_owned");
+            if (taskLifecycle.isEmpty()) taskLifecycle.start(owner, id);
+            boolean alreadyCompleted = taskLifecycle.completed(owner, id);
+            TaskLifecycle.Token completed = taskLifecycle.finish(owner, id);
+            if (completed == null) throw new OperationFailure("stale_task", 409, "not_applied");
+            if (!alreadyCompleted) controlOwnership.completeTask(owner);
+            ControlActionReceiver.updateNotification(this, false);
+            return completed;
+        }
+    }
+
+    private java.util.function.BooleanSupplier presentationGuard(TaskLifecycle.Token task) {
+        return () -> taskLifecycle.isCurrent(task) && !controlOwnership.stopped();
+    }
+
+    private java.util.function.BooleanSupplier activePresentationGuard() {
+        String owner = currentTargetContextId();
+        TaskLifecycle.Token task = taskLifecycle.active(owner);
+        OperationDeadline deadline = requestDeadline.get();
+        Long ticket = requestControlTicket.get();
+        return () -> (task == null ? taskLifecycle.isEmpty() : taskLifecycle.isCurrent(task)) && ticket != null
+                && controlOwnership.isCurrent(ticket, owner)
+                && (deadline == null || !deadline.expired(System.nanoTime()));
     }
 
     private static OperationDeadline deadlineFor(Map<String, String> envelope, long receivedNanos, long maximumMs) {
@@ -574,6 +627,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 try {
                     Map<String, String> budgetParams = parseJsonObject(body);
                     budgetParams.putAll(parseQuery(target.contains("?") ? target.substring(target.indexOf('?') + 1) : ""));
+                    requestTaskId.set(taskIdFor(budgetParams));
                     OperationDeadline deadline = deadlineFor(budgetParams, receivedNanos, 120_000L);
                     if (deadline == null) throw new OperationFailure("op_invalid", 400, "not_applied");
                     requestDeadline.set(deadline);
@@ -593,6 +647,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                     requestTargetContextId.remove();
                     requestControlTicket.remove();
                     requestDeadline.remove();
+                    requestTaskId.remove();
                     requestMutationAccepted.remove();
                 }
             }
@@ -769,6 +824,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
                             continue;
                         }
                         requestDeadline.set(deadline);
+                        try { requestTaskId.set(taskIdFor(message)); }
+                        catch (OperationFailure e) {
+                            requestDeadline.remove();
+                            sendWsError(session, id, e.code, e.code);
+                            continue;
+                        }
                         requestControlTicket.set(controlOwnership.ticket());
                         try {
                             synchronized (controlExecutionLock) {
@@ -778,6 +839,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                             session.sendText(WsCallResult.failure(id, e.code, e.outcome, 0L).toFrameJson());
                         } finally {
                             requestDeadline.remove();
+                            requestTaskId.remove();
                             requestControlTicket.remove();
                             session.touchControlActivity();
                         }
@@ -829,10 +891,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         requestBearerToken.set(session == null ? "" : session.sessionToken);
         lastTargetContextId = contextId;
         OperationDeadline parentDeadline = requestDeadline.get();
+        String parentTaskId = requestTaskId.get();
         boolean parentMutation = requestMutationAccepted.get();
         requestMutationAccepted.set(false);
         try {
             Map<String, String> envelope = parseJsonObject(frameText);
+            if (envelope.containsKey("taskId")) requestTaskId.set(taskIdFor(envelope));
             if (envelope.containsKey("timeoutMs")) {
                 OperationDeadline child = deadlineFor(envelope, System.nanoTime(), 120_000L);
                 if (child == null) return WsCallResult.failure(id, "op_invalid", "not_applied", 0L);
@@ -849,6 +913,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             return WsCallResult.failure(id, "op_failed", failureOutcome("not_applied"), 0L);
         } finally {
             if (parentDeadline == null) requestDeadline.remove(); else requestDeadline.set(parentDeadline);
+            if (parentTaskId == null) requestTaskId.remove(); else requestTaskId.set(parentTaskId);
             requestMutationAccepted.set(parentMutation);
             requestTargetContextId.remove();
             requestBearerToken.remove();
@@ -870,8 +935,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
         if (("POST".equals(spec.httpMethod) && !WsOperation.OP_UI_FIND.equals(spec.op)
                 && !WsOperation.OP_UI_WAIT.equals(spec.op)) || WsOperation.OP_TERMUX_EXEC.equals(spec.op)
-                || WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)
-                || WsOperation.OP_TASK_COMPLETION_SHOW.equals(spec.op)) checkControl();
+                || WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)) checkControl();
         if (WsOperation.OP_TERMUX_EXEC.equals(spec.op)) {
             BearerTokenManager.Verification authorization = authorizedTermuxToken(session);
             if (!authorization.ok || !authorization.record.hasScope(BearerTokenManager.SCOPE_TERMUX_COMMAND)) {
@@ -900,7 +964,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 }
                 int result = overlay == null ? TaskProgressModel.UPDATE_UNAVAILABLE
                         : overlay.setTaskProgressPlan(session, progress.goal, progress.steps,
-                                progress.replan);
+                                progress.replan, activePresentationGuard());
                 if (result == TaskProgressModel.UPDATE_INVALID) {
                     return WsCallResult.error(id, "op_invalid",
                             "Structured progress requires a goal and one to six valid steps",
@@ -934,7 +998,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 return WsCallResult.error(id, "op_invalid",
                         "Progress set requires goal, completed, or current", elapsed(started));
             }
-            if (overlay == null || !overlay.setTaskProgress(session, goal, completed, current)) {
+            if (overlay == null || !overlay.setTaskProgress(session, goal, completed, current, activePresentationGuard())) {
                 return WsCallResult.error(id, "progress_unavailable",
                         "Task progress overlay unavailable", elapsed(started));
             }
@@ -942,9 +1006,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
         if (WsOperation.OP_TASK_PROGRESS_FINISH.equals(spec.op)) {
             ConnectionStatusOverlay overlay = connectionStatusOverlay;
-            boolean cleared = overlay != null && overlay.clearTaskProgress(session, false);
+            TaskLifecycle.Token completed = finishCurrentTask();
+            boolean cleared = overlay != null && overlay.completeTask("Completed", completed, presentationGuard(completed));
             return WsCallResult.ok(id, "{\"ok\":true,\"applied\":true,\"cleared\":" +
-                    cleared + "}", elapsed(started));
+                    cleared + ",\"controlState\":\"available\"}", elapsed(started));
         }
         if (WsOperation.OP_TASK_COMPLETION_SHOW.equals(spec.op)) {
             String message;
@@ -964,17 +1029,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         "Completion message must be a non-empty string", elapsed(started));
             }
             ConnectionStatusOverlay overlay = connectionStatusOverlay;
-            int result = overlay == null ? CompletionMessageModel.SHOW_INVALID
-                    : overlay.showTaskCompletion(message);
-            if (result == CompletionMessageModel.SHOW_PROGRESS_ACTIVE) {
-                return WsCallResult.error(id, "completion_progress_active",
-                        "Finish task progress before showing completion", elapsed(started));
-            }
-            if (result != CompletionMessageModel.SHOW_ACCEPTED) {
-                return WsCallResult.error(id, "completion_unavailable",
-                        "Completion presentation unavailable", elapsed(started));
-            }
-            return WsCallResult.ok(id, "{\"ok\":true,\"applied\":true}", elapsed(started));
+            TaskLifecycle.Token completed = finishCurrentTask();
+            boolean shown = overlay != null && overlay.completeTask(message, completed, presentationGuard(completed));
+            return WsCallResult.ok(id, "{\"ok\":true,\"applied\":true,\"controlState\":\"available\",\"presentationAccepted\":"
+                    + shown + "}", elapsed(started));
         }
         noteControlActivity(displaySummary(frameText));
         if (isUserVisibleObservation(spec.op)) {
@@ -1902,7 +1960,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private static String capabilitiesJson() {
-        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\"");
+        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\"");
         if (Build.VERSION.SDK_INT >= 30) {
             features.append(",\"displayTargeting\",\"displayCapture\",\"screenshotCoordinates\"");
         }
@@ -4478,7 +4536,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
             for (WsSession candidate : wsSessions) {
                 if (!candidate.closed && candidate.sessionTokenId.equals(session.sessionTokenId)) remaining = true;
             }
-            if (!remaining) controlOwnership.release(contextId);
+            if (!remaining) {
+                synchronized (controlOwnership) {
+                    controlOwnership.release(contextId);
+                    taskLifecycle.invalidate(contextId);
+                }
+            }
         }
         refreshConnectionStatusOverlay();
     }
@@ -4504,7 +4567,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private void noteControlActivity(String summary) {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay != null) {
-            overlay.noteControlActivity(summary);
+            overlay.noteControlActivity(summary, activePresentationGuard());
         }
     }
 
