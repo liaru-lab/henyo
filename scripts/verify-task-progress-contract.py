@@ -43,14 +43,14 @@ require(SERVICE, "Replan requires structured progress steps",
         "direct WS legacy payloads must not silently ignore replan")
 require(OVERLAY, "progressOwner != owner", "a different disconnect must not clear active progress")
 require(OVERLAY, "progressModel.clear();", "disconnect must remove stale progress")
-require(OVERLAY, "float planTop = height - backdropHeightPx + 32f * density;",
-        "plan must use a fixed anchor independent of caption rows")
+require(OVERLAY, "float planTop = panelLayout.planTop;",
+        "plan must use measured shared-panel geometry")
 require(OVERLAY, "drawTaskProgress(canvas, progressRows, left, textWidth, planTop, now)",
         "plan drawing must not consume the caption layout cursor")
-require(OVERLAY, "drawActivityBackground(canvas, backgroundAlpha, progressRows.size(), dynamicShadeTop)",
-        "one background pass must select progress shading only for active rows")
-require(OVERLAY, "progressRowCount > 0 ? progressActivityShadeShader : activityShadeShader",
-        "finish must restore the independent caption background shader")
+require(OVERLAY, "drawActivityBackground(canvas, backgroundAlpha, panelWidth, now)",
+        "one background pass must cover the measured content")
+require(OVERLAY, "progressRowHeightPx = Math.max(28f * density,",
+        "scaled fonts must increase plan row height")
 require(HELPER, "def set_progress", "Python WS client needs an explicit set method")
 require(HELPER, "def finish_progress", "Python WS client needs an explicit finish method")
 require(HELPER, 'if cmd == "progress.set"', "helper IPC needs explicit progress.set")
@@ -67,24 +67,7 @@ for source, label in ((PROTOCOL, "protocol"), (IPC, "helper IPC"), (SKILL, "cano
 if '"progress"' in HELPER.split("self.cache: Dict[str, Any] =", 1)[1].split("}", 1)[0]:
     raise AssertionError("helper cache must not retain presentation progress")
 
-for marker in (
-    "plan_region", "caption_region", "planRemovedImmediatelyRatio",
-    '"captionRemainedAfterFinish": False', "captionRetainedFromBaselineRatio",
-    "captionAnchorShiftPx", "statusAnchorShiftPx", '"controlReleasedAfterFinish": True',
-    "planBackgroundModeledNavy", "captionBackgroundModeledNavy",
-    "backgroundModeledNavyRatio", "planBackgroundRegion",
-    "captionBackgroundRegion", "sameConditionAdbComparison",
-    "fadeLeadDp", "fadeSpanDp", "fadeUpperModeledNavy", "fadeMidModeledNavy",
-    "captionParityRgbMeanAbsolute", "captionParityLuminanceFraction",
-    "controlledPlanModeledNavy", "controlledCaptionModeledNavy",
-    "controlledReferenceRatio", "planAbsentChangedRatio",
-    "helper.stop_helper", "restart_helper_disconnected",
-    "temporaryArtifactsCleaned",
-):
-    require(LIVE, marker, "live verifier must measure separated plan/caption regions")
-if "finishedLowerChangedRatio" in LIVE or "sleep(23" in LIVE:
-    raise AssertionError("live verifier must not rely on whole-overlay lease expiry")
-if "time.sleep(0.5)" in LIVE:
-    raise AssertionError("live verifier must wait for helper shutdown instead of sleeping")
+for marker in ("sharedSurfaceOpacity", "gradientSeamDelta", "completionDismissed", "artifacts"):
+    require(LIVE, marker, "live verifier must cover the modern surface and completion")
 
 print("task progress contract verifier passed")

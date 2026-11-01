@@ -286,6 +286,8 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyConnectionOverlay"
+    dependsOn "verifyActivityPanelLayout"
     dependsOn "verifyTaskPresentation"
     dependsOn "verifyTaskLifecycle"
     dependsOn "verifyHttpRequestReader"
@@ -312,6 +314,14 @@ tasks.register("verifyTaskLifecycle", Exec) {
 
 tasks.register("verifyTaskPresentation", Exec) {
     commandLine "python", "scripts/verify-task-presentation.py"
+}
+
+tasks.register("verifyActivityPanelLayout", Exec) {
+    commandLine "python", "scripts/verify-activity-panel-layout.py"
+}
+
+tasks.register("verifyConnectionOverlay", Exec) {
+    commandLine "python", "scripts/verify-connection-overlay.py"
 }
 
 tasks.register("verifyScreenshotCallback", Exec) {

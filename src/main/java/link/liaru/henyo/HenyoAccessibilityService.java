@@ -2327,7 +2327,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         preferredTargetWindowId = target.windowId;
         preferredTargetDisplayId = target.displayId;
         lastTargetContextId = currentTargetContextId();
-        updateTargetOverlay(target.windowId, target.displayId, target.bounds, target.presentationRegion);
+        updateTargetOverlay(target);
         targetHistoryStore.record(lastTargetContextId, target.toHint(), SystemClock.elapsedRealtime());
     }
 
@@ -2349,17 +2349,32 @@ public class HenyoAccessibilityService extends AccessibilityService {
         recycleWindows(windows);
     }
 
-    private void updateTargetOverlay(int windowId, int displayId, Rect bounds, Region presentationRegion) {
+    private void updateTargetOverlay(TargetSnapshot target) {
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay == null) return;
         DisplayManager manager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        Display display = manager == null ? null : manager.getDisplay(displayId);
+        Display display = manager == null ? null : manager.getDisplay(target.displayId);
         DisplayMetrics metrics = new DisplayMetrics();
         if (display != null) display.getRealMetrics(metrics);
         if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
             metrics.setTo(getResources().getDisplayMetrics());
         }
-        overlay.setTargetWindow(windowId, displayId, bounds, presentationRegion,
+        Rect focusedInput = new Rect();
+        if (target.root != null && target.presentationRegion.getBounds().bottom < metrics.heightPixels - 120f * metrics.density) {
+            AccessibilityNodeInfo focused = null;
+            try {
+                focused = target.root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                if (focused != null && focused.isEditable() && focused.getWindowId() == target.windowId) {
+                    focused.getBoundsInScreen(focusedInput);
+                    if (!focusedInput.intersect(target.presentationRegion.getBounds())) focusedInput.setEmpty();
+                }
+            } catch (RuntimeException ignored) {
+                focusedInput.setEmpty();
+            } finally {
+                if (focused != null) focused.recycle();
+            }
+        }
+        overlay.setTargetWindow(target.windowId, target.displayId, target.bounds, target.presentationRegion, focusedInput,
                 metrics.widthPixels, metrics.heightPixels, metrics.density);
     }
 
