@@ -21,6 +21,13 @@ final class BearerAuthPolicy {
                 || path.startsWith("/v1/termux/");
     }
 
+    static boolean requiresControlScope(String path) {
+        return path.startsWith("/v1/app/") || path.startsWith("/v1/ui/")
+                || path.startsWith("/v1/screen/") || path.startsWith("/v1/global/")
+                || path.startsWith("/app/") || path.startsWith("/ui/")
+                || path.startsWith("/screen/") || path.startsWith("/global/");
+    }
+
     static ParsedAuthorization parse(String authorization) {
         if (authorization == null || authorization.trim().isEmpty()) {
             return new ParsedAuthorization(AUTH_MISSING, "");

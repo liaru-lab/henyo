@@ -19,7 +19,7 @@ public final class GestureGuardTest {
     static class Region { Rect bounds=new Rect(0,0,1000,1000);boolean contains(int x,int y){return bounds.contains(x,y);} }
     static class Build {static class VERSION{static int SDK_INT=35;}}
     static class Display{static int DEFAULT_DISPLAY=0;}
-    static class AccessibilityNodeInfo{String name; AccessibilityNodeInfo(String s){name=s;}String getPackageName(){return name;}void recycle(){}}
+    static class AccessibilityNodeInfo{String name; AccessibilityNodeInfo(String s){name=s;}String getPackageName(){return name;}int getWindowId(){return 1;}void recycle(){rootRecycled++;}}
     static class AccessibilityWindowInfo {
         int id,display,layer;String name="example.app";Rect bounds;
         AccessibilityWindowInfo(int id,int display,int layer,Rect b){this.id=id;this.display=display;this.layer=layer;bounds=b;}
@@ -27,10 +27,12 @@ public final class GestureGuardTest {
         void getBoundsInScreen(Rect out){out.set(bounds);}void getRegionInScreen(Region out){out.bounds=bounds;}
     }
     static class TargetRef{int windowId=1,displayId=0;String packageName="example.app";Rect bounds=new Rect(0,0,1000,1000);Region actionableRegion=new Region();}
+    static int rootRecycled; boolean deny;
     List<AccessibilityWindowInfo> windows=new ArrayList<>();int probes,recycles;
     List<AccessibilityWindowInfo> allWindows(){return windows;}
     AccessibilityNodeInfo windowRoot(AccessibilityWindowInfo w){probes++;return new AccessibilityNodeInfo(w.name);}
     void recycleWindows(List<AccessibilityWindowInfo> ignored){recycles++;}
+    void requireRootAccess(AccessibilityNodeInfo node) {if(deny)throw new IllegalStateException("synthetic denied root");}
     String str(Object o){return o==null?"":o.toString();}
     static void check(boolean v,String message){if(!v)throw new AssertionError(message);}
     public static void main(String[] args){
@@ -45,6 +47,10 @@ public final class GestureGuardTest {
         own.bounds=new Rect(0,0,900,1000);check(guard.gestureBlockReason(target,xs,ys).equals("stale_target"),"resized target accepted");
         own.bounds=target.bounds;own.name="other.app";check(guard.gestureBlockReason(target,xs,ys).equals("stale_target"),"root identity change accepted");
         own.name="example.app";check(guard.gestureBlockReason(target,new int[]{1000},new int[]{100}).equals("target_outside"),"outside point accepted");
+        guard.deny=true;int recycled=guard.recycles,roots=rootRecycled;
+        try{guard.gestureBlockReason(target,xs,ys);throw new AssertionError("denied root accepted");}
+        catch(IllegalStateException expected){check(guard.recycles==recycled+1&&rootRecycled==roots+1,"denied root must release its node and window list");}
+        guard.deny=false;
         guard.windows.remove(own);check(guard.gestureBlockReason(target,xs,ys).equals("stale_target"),"missing target accepted");
         System.out.println("GestureGuardTest passed");
     }

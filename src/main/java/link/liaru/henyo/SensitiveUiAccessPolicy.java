@@ -15,6 +15,10 @@ final class SensitiveUiAccessPolicy {
                 || path.startsWith("/screen/"));
     }
 
+    static boolean allows(SensitiveTreeInspector.Result inspection, boolean pairedClient, boolean hasSensitiveScope) {
+        return allows(inspection != SensitiveTreeInspector.Result.CLEAR, pairedClient, hasSensitiveScope);
+    }
+
     static boolean allows(boolean sensitiveUiPresent, boolean pairedClient, boolean hasSensitiveScope) {
         return !sensitiveUiPresent || !pairedClient || hasSensitiveScope;
     }
