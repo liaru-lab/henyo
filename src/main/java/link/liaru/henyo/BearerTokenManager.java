@@ -26,6 +26,8 @@ final class BearerTokenManager {
     private static final String KEY_RECORDS = "records";
     private static final String HASH_PREFIX = "sha256:";
     private static final int TOKEN_BYTES = 32;
+    // UI and service managers share one read/modify/write transaction boundary.
+    private static final Object RECORDS_LOCK = new Object();
 
     private final SharedPreferences prefs;
     private final SecureRandom random;
@@ -39,130 +41,148 @@ final class BearerTokenManager {
         this.random = random;
     }
 
-    synchronized CreatedToken create(String name, List<String> scopes) {
-        long now = System.currentTimeMillis();
-        String rawToken = generateToken();
-        TokenRecord record = new TokenRecord(
-                UUID.randomUUID().toString(),
-                cleanName(name),
-                normalizeScopes(scopes),
-                hashToken(rawToken),
-                now,
-                0,
-                "",
-                false,
-                0);
-        List<TokenRecord> records = loadRecords();
-        records.add(record);
-        saveRecords(records);
-        return new CreatedToken(rawToken, record);
+    CreatedToken create(String name, List<String> scopes) {
+        synchronized (RECORDS_LOCK) {
+            long now = System.currentTimeMillis();
+            String rawToken = generateToken();
+            TokenRecord record = new TokenRecord(
+                    UUID.randomUUID().toString(),
+                    cleanName(name),
+                    normalizeScopes(scopes),
+                    hashToken(rawToken),
+                    now,
+                    0,
+                    "",
+                    false,
+                    0);
+            List<TokenRecord> records = loadRecords();
+            records.add(record);
+            saveRecords(records);
+            return new CreatedToken(rawToken, record);
+        }
     }
 
-    synchronized TokenRecord importToken(String rawToken, String name, List<String> scopes) {
-        if (rawToken == null || rawToken.isEmpty() || rawToken.length() > 4096) {
-            throw new IllegalArgumentException("token is required");
-        }
-        String tokenHash = hashToken(rawToken);
-        List<TokenRecord> records = loadRecords();
-        for (int i = 0; i < records.size(); i++) {
-            TokenRecord record = records.get(i);
-            if (constantTimeEquals(tokenHash, record.tokenHash)) {
-                TokenRecord updated = record.withScopes(normalizeScopes(scopes));
-                records.set(i, updated);
-                saveRecords(records);
-                return updated;
+    TokenRecord importToken(String rawToken, String name, List<String> scopes) {
+        synchronized (RECORDS_LOCK) {
+            if (rawToken == null || rawToken.isEmpty() || rawToken.length() > 4096) {
+                throw new IllegalArgumentException("token is required");
             }
-        }
-        TokenRecord record = new TokenRecord(
-                UUID.randomUUID().toString(),
-                cleanName(name),
-                normalizeScopes(scopes),
-                tokenHash,
-                System.currentTimeMillis(),
-                0,
-                "",
-                false,
-                0);
-        records.add(record);
-        saveRecords(records);
-        return record;
-    }
-
-    synchronized Verification verify(String token, String sourceAddress) {
-        if (token == null || token.isEmpty()) return Verification.invalid();
-        List<TokenRecord> records = loadRecords();
-        String candidateHash = hashToken(token);
-        long now = System.currentTimeMillis();
-        for (int i = 0; i < records.size(); i++) {
-            TokenRecord record = records.get(i);
-            if (constantTimeEquals(candidateHash, record.tokenHash)) {
-                if (record.revoked) return Verification.revoked(record);
-                TokenRecord updated = record.withLastUsed(now, sourceAddress == null ? "" : sourceAddress);
-                records.set(i, updated);
-                saveRecords(records);
-                return Verification.valid(updated);
-            }
-        }
-        return Verification.invalid();
-    }
-
-    synchronized boolean hasActiveScope(String token, String scope) {
-        if (token == null || token.isEmpty() || !isKnownScope(scope)) return false;
-        String candidateHash = hashToken(token);
-        for (TokenRecord record : loadRecords()) {
-            if (constantTimeEquals(candidateHash, record.tokenHash)) {
-                return !record.revoked && record.hasScope(scope);
-            }
-        }
-        return false;
-    }
-
-    synchronized List<TokenRecord> list() {
-        return Collections.unmodifiableList(loadRecords());
-    }
-
-    synchronized boolean revoke(String tokenId) {
-        List<TokenRecord> records = loadRecords();
-        long now = System.currentTimeMillis();
-        for (int i = 0; i < records.size(); i++) {
-            TokenRecord record = records.get(i);
-            if (record.id.equals(tokenId)) {
-                if (!record.revoked) {
-                    records.set(i, record.withRevoked(now));
+            String tokenHash = hashToken(rawToken);
+            List<TokenRecord> records = loadRecords();
+            for (int i = 0; i < records.size(); i++) {
+                TokenRecord record = records.get(i);
+                if (constantTimeEquals(tokenHash, record.tokenHash)) {
+                    TokenRecord updated = record.withScopes(normalizeScopes(scopes));
+                    records.set(i, updated);
                     saveRecords(records);
+                    return updated;
                 }
+            }
+            TokenRecord record = new TokenRecord(
+                    UUID.randomUUID().toString(),
+                    cleanName(name),
+                    normalizeScopes(scopes),
+                    tokenHash,
+                    System.currentTimeMillis(),
+                    0,
+                    "",
+                    false,
+                    0);
+            records.add(record);
+            saveRecords(records);
+            return record;
+        }
+    }
+
+    Verification verify(String token, String sourceAddress) {
+        synchronized (RECORDS_LOCK) {
+            if (token == null || token.isEmpty()) return Verification.invalid();
+            List<TokenRecord> records = loadRecords();
+            String candidateHash = hashToken(token);
+            long now = System.currentTimeMillis();
+            for (int i = 0; i < records.size(); i++) {
+                TokenRecord record = records.get(i);
+                if (constantTimeEquals(candidateHash, record.tokenHash)) {
+                    if (record.revoked) return Verification.revoked(record);
+                    TokenRecord updated = record.withLastUsed(now, sourceAddress == null ? "" : sourceAddress);
+                    records.set(i, updated);
+                    saveRecords(records);
+                    return Verification.valid(updated);
+                }
+            }
+            return Verification.invalid();
+        }
+    }
+
+    boolean hasActiveScope(String token, String scope) {
+        synchronized (RECORDS_LOCK) {
+            if (token == null || token.isEmpty() || !isKnownScope(scope)) return false;
+            String candidateHash = hashToken(token);
+            for (TokenRecord record : loadRecords()) {
+                if (constantTimeEquals(candidateHash, record.tokenHash)) {
+                    return !record.revoked && record.hasScope(scope);
+                }
+            }
+            return false;
+        }
+    }
+
+    List<TokenRecord> list() {
+        synchronized (RECORDS_LOCK) {
+            return Collections.unmodifiableList(loadRecords());
+        }
+    }
+
+    boolean revoke(String tokenId) {
+        synchronized (RECORDS_LOCK) {
+            List<TokenRecord> records = loadRecords();
+            long now = System.currentTimeMillis();
+            for (int i = 0; i < records.size(); i++) {
+                TokenRecord record = records.get(i);
+                if (record.id.equals(tokenId)) {
+                    if (!record.revoked) {
+                        records.set(i, record.withRevoked(now));
+                        saveRecords(records);
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    boolean setScope(String tokenId, String scope, boolean enabled) {
+        synchronized (RECORDS_LOCK) {
+            if (!isKnownScope(scope)) return false;
+            List<TokenRecord> records = loadRecords();
+            for (int i = 0; i < records.size(); i++) {
+                TokenRecord record = records.get(i);
+                if (!record.id.equals(tokenId) || record.revoked) continue;
+                List<String> scopes = new ArrayList<>(record.scopes);
+                if (enabled && !scopes.contains(scope)) scopes.add(scope);
+                if (!enabled) scopes.remove(scope);
+                records.set(i, record.withScopes(normalizeScopes(scopes)));
+                saveRecords(records);
                 return true;
             }
+            return false;
         }
-        return false;
     }
 
-    synchronized boolean setScope(String tokenId, String scope, boolean enabled) {
-        if (!isKnownScope(scope)) return false;
-        List<TokenRecord> records = loadRecords();
-        for (int i = 0; i < records.size(); i++) {
-            TokenRecord record = records.get(i);
-            if (!record.id.equals(tokenId) || record.revoked) continue;
-            List<String> scopes = new ArrayList<>(record.scopes);
-            if (enabled && !scopes.contains(scope)) scopes.add(scope);
-            if (!enabled) scopes.remove(scope);
-            records.set(i, record.withScopes(normalizeScopes(scopes)));
-            saveRecords(records);
-            return true;
+    TokenRecord find(String tokenId) {
+        synchronized (RECORDS_LOCK) {
+            if (tokenId == null || tokenId.isEmpty()) return null;
+            for (TokenRecord record : loadRecords()) {
+                if (record.id.equals(tokenId)) return record;
+            }
+            return null;
         }
-        return false;
     }
 
-    synchronized TokenRecord find(String tokenId) {
-        if (tokenId == null || tokenId.isEmpty()) return null;
-        for (TokenRecord record : loadRecords()) {
-            if (record.id.equals(tokenId)) return record;
+    int count() {
+        synchronized (RECORDS_LOCK) {
+            return loadRecords().size();
         }
-        return null;
-    }
-
-    synchronized int count() {
-        return loadRecords().size();
     }
 
     private String generateToken() {

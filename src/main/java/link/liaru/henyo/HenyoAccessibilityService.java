@@ -269,6 +269,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 : service.controlOwnership.stopped();
     }
 
+    static String controlState(Context context) {
+        HenyoAccessibilityService service = instance;
+        return service == null || service.controlOwnership == null
+                ? (isControlStopped(context) ? "stopped" : "available") : service.controlOwnership.state();
+    }
+
     static void setControlStopped(Context context, boolean stopped) {
         HenyoAccessibilityService service = instance;
         if (service != null && service.controlOwnership != null) {
@@ -297,7 +303,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 && !tokens().hasActiveScope(token, BearerTokenManager.SCOPE_CONTROL)) {
             throw new ControlOwnership.Unavailable("auth_revoked");
         }
+        boolean wasAvailable = controlOwnership.owner().isEmpty();
         controlOwnership.check(ticket, currentTargetContextId());
+        if (wasAvailable) ControlActionReceiver.updateNotification(this, controlOwnership.stopped());
     }
 
     private boolean controlledGlobalAction(int action) {
@@ -1761,6 +1769,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 ",\"protocol\":{\"version\":" + PROTOCOL_VERSION +
                 ",\"contractRevision\":\"" + CONTRACT_REVISION + "\"}" +
                 ",\"capabilities\":" + capabilitiesJson() + ",\"lastEventTime\":" + lastEventTime +
+                ",\"controlState\":\"" + controlOwnership.state() + "\"" +
                 ",\"remoteAccess\":" + withTokenCount(config.summaryJson(activeBindHost, activeRemoteServing)) +
                 ",\"webSocket\":{\"endpoint\":\"/v1/ws/control\",\"activeSessions\":" + activeWsSessions + "}" +
                 ",\"tailscaleWatchdog\":" + watchdog + "}");
@@ -4355,6 +4364,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private void refreshConnectionStatusOverlay() {
+        if (running) ControlActionReceiver.updateNotification(this, controlOwnership.stopped());
         ConnectionStatusOverlay overlay = connectionStatusOverlay;
         if (overlay == null) {
             return;

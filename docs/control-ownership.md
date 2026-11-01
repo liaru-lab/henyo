@@ -4,6 +4,8 @@ A connected client is not necessarily the control owner. The first accepted
 mutation or task presentation claims control for that client identity. Other
 clients receive `control_owned` until ownership is released. Local clients
 share the local compatibility identity; paired clients use their token identity.
+The activity, notification, and health response distinguish `available`, `active`,
+and `stopped`; the health response exposes this as `controlState` without client identifiers.
 
 The on-device **Stop control** button is available in the activity, a compact
 overlay, and the notification. It clears task presentations and prevents new or

@@ -26,7 +26,9 @@ public final class ControlActionReceiver extends BroadcastReceiver {
                 new Intent(context, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder builder = new Notification.Builder(context, CHANNEL)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle(stopped ? "Control stopped" : "Henyo control available")
+                .setContentTitle(stopped ? "Control stopped"
+                        : "active".equals(HenyoAccessibilityService.controlState(context))
+                        ? "Henyo control active" : "Henyo control available")
                 .setContentText(stopped ? "Open Henyo to resume control." : "Stop control to take over.")
                 .setContentIntent(open).setOngoing(true);
         if (!stopped) {

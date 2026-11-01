@@ -7,8 +7,10 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class ControlOwnershipTest {
     public static void main(String[] args) throws Exception {
         ControlOwnership gate = new ControlOwnership(false);
+        if (!"available".equals(gate.state())) throw new AssertionError("available state");
         long initial = gate.ticket();
         gate.check(initial, "client-a");
+        if (!"active".equals(gate.state())) throw new AssertionError("active state");
         denied(() -> gate.check(initial, "client-b"), "control_owned");
         gate.release("client-b");
         denied(() -> gate.check(initial, "client-b"), "control_owned");
@@ -28,6 +30,7 @@ public final class ControlOwnershipTest {
         worker.start();
         if (!queued.await(2, TimeUnit.SECONDS)) throw new AssertionError("worker did not queue");
         gate.stop();
+        if (!"stopped".equals(gate.state())) throw new AssertionError("stopped state");
         if (!gate.stopped() || !gate.owner().isEmpty()) throw new AssertionError("stop state");
         denied(() -> gate.check(gate.ticket(), "client-a"), "control_stopped");
         gate.resume();

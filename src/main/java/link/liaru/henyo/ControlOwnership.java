@@ -11,6 +11,7 @@ final class ControlOwnership {
     synchronized long ticket() { return generation; }
     synchronized boolean stopped() { return stopped; }
     synchronized String owner() { return owner; }
+    synchronized String state() { return stopped ? "stopped" : owner.isEmpty() ? "available" : "active"; }
 
     synchronized void stop() {
         stopped = true;

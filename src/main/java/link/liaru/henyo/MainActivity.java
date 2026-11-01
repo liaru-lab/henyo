@@ -308,7 +308,7 @@ public class MainActivity extends Activity {
         controlButton.setText(HenyoAccessibilityService.isControlStopped(this)
                 ? "Resume control" : "Stop control");
         RemoteAccessConfig config = RemoteAccessConfig.load(this);
-        status.setText(config.displayStatus());
+        status.setText(config.displayStatus() + "\nControl: " + HenyoAccessibilityService.controlState(this));
 
         PairingSessionManager manager = PairingSessionManager.get();
         long now = System.currentTimeMillis();
