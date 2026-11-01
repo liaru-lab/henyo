@@ -676,6 +676,10 @@ class WsClient:
                     self.reader.start()
         except Exception:
             try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except (AttributeError, OSError):
+                pass
+            try:
                 sock.close()
             except OSError:
                 pass
@@ -694,10 +698,17 @@ class WsClient:
                 pending = list(self.pending.values())
                 self.pending.clear()
             try:
+                # Unblock the reader before close so the peer observes EOF now,
+                # rather than after another frame or the remote idle deadline.
+                sock.shutdown(socket.SHUT_RDWR)
+            except (AttributeError, OSError):
+                pass
+            try:
                 sock.close()
             except OSError:
                 pass
-            failure = {"ok": False, "error": "ws_disconnected", "reason": reason}
+            failure = {"ok": False, "error": "ws_disconnected", "reason": reason,
+                       "outcome": "unknown", "retrySafe": False}
             for waiter in pending:
                 try:
                     waiter.put_nowait(failure)
@@ -758,19 +769,19 @@ class WsClient:
                     payload["actionId"] = action_id
                 if expected_service_epoch is not None:
                     payload["expectedServiceEpoch"] = expected_service_epoch
-                if timeout_ms is not None:
-                    payload["timeoutMs"] = timeout_ms
+                payload["timeoutMs"] = timeout_ms if timeout_ms is not None else min(
+                    MAX_CALL_TIMEOUT_MS, max(1, int(timeout * 1000)))
                 if display is not None:
                     payload["display"] = display
                 sock.sendall(encode_client_text(payload))
         except Exception as exc:
             self.last_error = str(exc)
             self.close(expected_sock=sock)
-            return {"ok": False, "error": "ws_disconnected"}
+            return {"ok": False, "error": "ws_disconnected", "outcome": "unknown", "retrySafe": False}
         try:
             return q.get(timeout=timeout)
         except Exception:
-            return {"ok": False, "error": "timeout"}
+            return {"ok": False, "error": "timeout", "outcome": "unknown", "retrySafe": False}
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)
@@ -806,8 +817,8 @@ class WsClient:
                     "stopOnError": stop_on_error,
                     "returnTree": return_tree,
                 }
-                if timeout_ms is not None:
-                    payload["timeoutMs"] = timeout_ms
+                payload["timeoutMs"] = timeout_ms if timeout_ms is not None else min(
+                    MAX_BATCH_TIMEOUT_MS, max(1, int(wait_timeout * 1000)))
                 if action_id:
                     payload["actionId"] = action_id
                 if display is not None:
@@ -816,11 +827,11 @@ class WsClient:
         except Exception as exc:
             self.last_error = str(exc)
             self.close(expected_sock=sock)
-            return {"ok": False, "error": "ws_disconnected"}
+            return {"ok": False, "error": "ws_disconnected", "outcome": "unknown", "retrySafe": False}
         try:
             return q.get(timeout=wait_timeout)
         except Exception:
-            return {"ok": False, "error": "timeout"}
+            return {"ok": False, "error": "timeout", "outcome": "unknown", "retrySafe": False}
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)

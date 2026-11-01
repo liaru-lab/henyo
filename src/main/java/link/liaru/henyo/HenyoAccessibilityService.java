@@ -101,6 +101,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final ThreadLocal<String> requestBearerToken = new ThreadLocal<>();
     private final ThreadLocal<String> requestTargetContextId = new ThreadLocal<>();
     private final ThreadLocal<Long> requestControlTicket = new ThreadLocal<>();
+    private final ThreadLocal<OperationDeadline> requestDeadline = new ThreadLocal<>();
+    private final ThreadLocal<Boolean> requestMutationAccepted = ThreadLocal.withInitial(() -> false);
     private ControlOwnership controlOwnership;
     private final PerformanceMetrics performanceMetrics = new PerformanceMetrics();
     private final LinkedHashMap<String, CaptureCoordinateMapping> captureMappings = new LinkedHashMap<>();
@@ -304,6 +306,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private void checkControl() {
+        checkDeadline();
         Long ticket = requestControlTicket.get();
         if (ticket == null) throw new ControlOwnership.Unavailable("control_stopped");
         String token = requestBearerToken.get();
@@ -316,13 +319,60 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (wasAvailable) ControlActionReceiver.updateNotification(this, controlOwnership.stopped());
     }
 
+    private void checkDeadline() {
+        OperationDeadline deadline = requestDeadline.get();
+        if (deadline != null && deadline.expired(System.nanoTime()))
+            throw new OperationFailure("deadline_exceeded", 408, "not_applied");
+    }
+
+    private static OperationDeadline deadlineFor(Map<String, String> envelope, long receivedNanos, long maximumMs) {
+        long timeout = maximumMs;
+        if (envelope.containsKey("timeoutMs")) {
+            try { timeout = Long.parseLong(envelope.get("timeoutMs")); }
+            catch (NumberFormatException e) { return null; }
+        }
+        return timeout < 1 || timeout > maximumMs ? null : new OperationDeadline(receivedNanos, timeout);
+    }
+
     private boolean controlledGlobalAction(int action) {
         return controlledDispatch(() -> performGlobalAction(action));
     }
 
     private <T> T controlledDispatch(java.util.function.Supplier<T> action) {
         checkControl();
-        return controlOwnership.dispatch(requestControlTicket.get(), currentTargetContextId(), action);
+        return controlOwnership.dispatch(requestControlTicket.get(), currentTargetContextId(), () -> {
+            checkDeadline();
+            T result;
+            try { result = action.get(); }
+            catch (RuntimeException e) {
+                // A platform/Binder exception cannot prove that submission had no effect.
+                requestMutationAccepted.set(true);
+                throw e;
+            }
+            if (Boolean.TRUE.equals(result) || result instanceof ComponentName) requestMutationAccepted.set(true);
+            return result;
+        });
+    }
+
+    private String failureOutcome(String outcome) {
+        return "not_applied".equals(outcome) && requestMutationAccepted.get() ? "unknown" : outcome;
+    }
+
+    private Response withFailureOutcome(Response response) {
+        if (!"application/json".equals(response.contentType)) return response;
+        String body = new String(response.body, StandardCharsets.UTF_8);
+        Map<String, String> fields = parseJsonObject(body);
+        if (!"false".equals(fields.get("ok")) || !body.endsWith("}")) return response;
+        String status = response.status;
+        if (status.startsWith("200 ")) status = "409 ERROR";
+        String suffix = "";
+        String code = fields.getOrDefault("code", fields.getOrDefault("error", "action_rejected"));
+        if (!fields.containsKey("code")) suffix += ",\"code\":\""
+                + escape(code) + "\"";
+        if (!fields.containsKey("error")) suffix += ",\"error\":\"" + escape(code) + "\"";
+        if (!fields.containsKey("outcome")) suffix += ",\"outcome\":\"" + failureOutcome("not_applied") + "\"";
+        return new Response(status, response.contentType,
+                (body.substring(0, body.length() - 1) + suffix + "}").getBytes(StandardCharsets.UTF_8), response.headers);
     }
 
     private boolean controlledNodeAction(AccessibilityNodeInfo node, int action, Bundle arguments) {
@@ -486,6 +536,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private void handleClient(Socket socket) {
+        long receivedNanos = System.nanoTime();
         try (socket) {
             InetAddress sourceAddress = socket.getInetAddress();
             InputStream in = socket.getInputStream();
@@ -535,14 +586,30 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 requestBearerToken.set(token);
                 requestTargetContextId.set(targetContextIdForToken(token));
                 requestControlTicket.set(controlOwnership.ticket());
+                requestMutationAccepted.set(false);
                 try {
-                    response = route(method, target, body);
+                    Map<String, String> budgetParams = parseJsonObject(body);
+                    budgetParams.putAll(parseQuery(target.contains("?") ? target.substring(target.indexOf('?') + 1) : ""));
+                    OperationDeadline deadline = deadlineFor(budgetParams, receivedNanos, 120_000L);
+                    if (deadline == null) throw new OperationFailure("op_invalid", 400, "not_applied");
+                    requestDeadline.set(deadline);
+                    checkDeadline();
+                    response = withFailureOutcome(route(method, target, body));
                 } catch (ControlOwnership.Unavailable e) {
-                    response = json(409, "{\"ok\":false,\"code\":\"" + e.code + "\",\"error\":\"" + e.code + "\"}");
+                    response = json(409, "{\"ok\":false,\"code\":\"" + e.code + "\",\"error\":\"" + e.code
+                            + "\",\"outcome\":\"" + failureOutcome("not_applied") + "\"}");
+                } catch (OperationFailure e) {
+                    response = json(e.status, "{\"ok\":false,\"code\":\"" + e.code
+                            + "\",\"error\":\"" + e.code + "\",\"outcome\":\"" + failureOutcome(e.outcome) + "\"}");
+                } catch (RuntimeException e) {
+                    response = json(500, "{\"ok\":false,\"code\":\"op_failed\",\"error\":\"op_failed\",\"outcome\":\""
+                            + failureOutcome("not_applied") + "\"}");
                 } finally {
                     requestBearerToken.remove();
                     requestTargetContextId.remove();
                     requestControlTicket.remove();
+                    requestDeadline.remove();
+                    requestMutationAccepted.remove();
                 }
             }
             byte[] responseBody = response.body;
@@ -660,6 +727,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 if (frame.opcode == WebSocketProtocol.OPCODE_PONG) {
                     continue;
                 }
+                long receivedNanos = System.nanoTime();
                 Map<String, String> message = parseJsonObject(frame.text);
                 String type = message.getOrDefault("type", "");
                 String id = message.getOrDefault("id", "");
@@ -711,12 +779,21 @@ public class HenyoAccessibilityService extends AccessibilityService {
                             continue;
                         }
                         session.touchControlActivity();
+                        OperationDeadline deadline = deadlineFor(message, receivedNanos, 300_000L);
+                        if (deadline == null) {
+                            sendWsError(session, id, "op_invalid", "Invalid timeoutMs");
+                            continue;
+                        }
+                        requestDeadline.set(deadline);
                         requestControlTicket.set(controlOwnership.ticket());
                         try {
                             synchronized (controlExecutionLock) {
                                 executeWsBatch(session, id, frame.text);
                             }
+                        } catch (OperationFailure e) {
+                            session.sendText(WsCallResult.failure(id, e.code, e.outcome, 0L).toFrameJson());
                         } finally {
+                            requestDeadline.remove();
                             requestControlTicket.remove();
                             session.touchControlActivity();
                         }
@@ -727,12 +804,19 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         }
                         session.touchControlActivity();
                         WsCallResult result;
+                        OperationDeadline deadline = deadlineFor(message, receivedNanos, 120_000L);
+                        if (deadline == null) {
+                            sendWsError(session, id, "op_invalid", "Invalid timeoutMs");
+                            continue;
+                        }
+                        requestDeadline.set(deadline);
                         requestControlTicket.set(controlOwnership.ticket());
                         try {
                             synchronized (controlExecutionLock) {
                                 result = executeWsCall(session, id, message.get("op"), frame.text);
                             }
                         } finally {
+                            requestDeadline.remove();
                             requestControlTicket.remove();
                             session.touchControlActivity();
                         }
@@ -760,11 +844,28 @@ public class HenyoAccessibilityService extends AccessibilityService {
         requestTargetContextId.set(contextId);
         requestBearerToken.set(session == null ? "" : session.sessionToken);
         lastTargetContextId = contextId;
+        OperationDeadline parentDeadline = requestDeadline.get();
+        boolean parentMutation = requestMutationAccepted.get();
+        requestMutationAccepted.set(false);
         try {
+            Map<String, String> envelope = parseJsonObject(frameText);
+            if (envelope.containsKey("timeoutMs")) {
+                OperationDeadline child = deadlineFor(envelope, System.nanoTime(), 120_000L);
+                if (child == null) return WsCallResult.failure(id, "op_invalid", "not_applied", 0L);
+                long limit = longParam(envelope, "timeoutMs", 120_000L);
+                requestDeadline.set(parentDeadline == null ? child : parentDeadline.limitedFrom(System.nanoTime(), limit));
+            }
+            checkDeadline();
             return executeWsCallInContext(session, id, op, frameText);
         } catch (ControlOwnership.Unavailable e) {
-            return WsCallResult.error(id, e.code, e.code, 0);
+            return WsCallResult.failure(id, e.code, failureOutcome("not_applied"), 0L);
+        } catch (OperationFailure e) {
+            return WsCallResult.failure(id, e.code, failureOutcome(e.outcome), 0L);
+        } catch (RuntimeException e) {
+            return WsCallResult.failure(id, "op_failed", failureOutcome("not_applied"), 0L);
         } finally {
+            if (parentDeadline == null) requestDeadline.remove(); else requestDeadline.set(parentDeadline);
+            requestMutationAccepted.set(parentMutation);
             requestTargetContextId.remove();
             requestBearerToken.remove();
         }
@@ -892,10 +993,6 @@ public class HenyoAccessibilityService extends AccessibilityService {
             return WsCallResult.ok(id, "{\"ok\":true,\"applied\":true}", elapsed(started));
         }
         noteControlActivity(displaySummary(frameText));
-        Map<String, String> envelope = parseJsonObject(frameText);
-        if (!envelope.getOrDefault("timeoutMs", "").isEmpty()) {
-            paramsJson = jsonObjectWithDefaultNumber(paramsJson, "timeout", envelope.get("timeoutMs"));
-        }
         if (isUserVisibleObservation(spec.op)) {
             noteObservation(id + ":" + spec.op + ":" + started);
         }
@@ -925,7 +1022,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         Map<String, String> queryParams = "GET".equals(spec.httpMethod)
                 ? parseJsonObject(paramsJson)
                 : new HashMap<String, String>();
-        Response response = routeV1(spec.httpMethod, spec.httpPath, queryParams, paramsJson);
+        Response response = withFailureOutcome(routeV1(spec.httpMethod, spec.httpPath, queryParams, paramsJson));
         long duration = System.currentTimeMillis() - started;
         if (spec.binaryResult) {
             if (!response.status.startsWith("200 ")) {
@@ -943,17 +1040,16 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (!response.status.startsWith("200 ")) {
             Map<String, String> error = parseJsonObject(body);
             String code = error.getOrDefault("code", error.getOrDefault("error", "op_failed"));
-            return WsCallResult.error(id, code, code, duration);
+            return WsCallResult.failure(id, code, error.getOrDefault("outcome", failureOutcome("not_applied")), duration);
         }
         return WsCallResult.ok(id, body, duration);
     }
 
     private void executeWsBatch(WsSession session, String id, String frameText) throws IOException {
+        checkDeadline();
         long started = System.currentTimeMillis();
         Map<String, String> batch = parseJsonObject(frameText);
         boolean stopOnError = boolParam(batch, "stopOnError", true);
-        long timeoutMs = longParam(batch, "timeoutMs", 0L);
-        long deadline = timeoutMs > 0 ? started + timeoutMs : 0L;
         List<String> steps = extractJsonObjectArray(frameText, "steps");
         if (steps.isEmpty()) {
             sendWsError(session, id, "op_invalid", "Batch requires at least one step");
@@ -964,9 +1060,9 @@ public class HenyoAccessibilityService extends AccessibilityService {
         boolean stopped = false;
         boolean shouldBurst = false;
         for (int i = 0; i < steps.size(); i++) {
-            if (deadline > 0 && System.currentTimeMillis() >= deadline) {
+            if (requestDeadline.get() != null && requestDeadline.get().expired(System.nanoTime())) {
                 if (i > 0) stepJson.append(",");
-                stepJson.append(WsCallResult.error("batch-timeout", "batch_timeout", "Batch timeout exceeded", elapsed(started)).toStepJson());
+                stepJson.append(WsCallResult.failure("batch-timeout", "batch_timeout", "not_applied", elapsed(started)).toStepJson());
                 stopped = true;
                 break;
             }
@@ -986,12 +1082,6 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 stopped = true;
                 break;
             }
-            if (deadline > 0 && System.currentTimeMillis() >= deadline && i + 1 < steps.size()) {
-                stepJson.append(",");
-                stepJson.append(WsCallResult.error("batch-timeout", "batch_timeout", "Batch timeout exceeded", elapsed(started)).toStepJson());
-                stopped = true;
-                break;
-            }
         }
         stepJson.append("]");
         session.sendText("{\"type\":\"result\",\"id\":\"" + escape(id) + "\",\"ok\":true,\"result\":{\"ok\":true,\"stoppedOnError\":" +
@@ -999,7 +1089,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         if (shouldBurst) {
             schedulePostActionBurst(session, "after_action", actionIdFor(batch, id));
         }
-        if (boolParam(batch, "returnTree", false)) {
+        if (boolParam(batch, "returnTree", false)
+                && (requestDeadline.get() == null || !requestDeadline.get().expired(System.nanoTime()))) {
             sendTreeEvent(session, "batch_return_tree", "", true, false, true);
         }
     }
@@ -1068,9 +1159,22 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 params.getOrDefault("stdin", ""),
                 timeoutMs);
         checkControl();
+        java.util.concurrent.atomic.AtomicReference<RuntimeException> dispatchFailure =
+                new java.util.concurrent.atomic.AtomicReference<>();
         TermuxCommandBridge.ExecutionResult result = TermuxCommandBridge.execute(this, request,
-                command -> controlledDispatch(() -> startService(command)));
-        return WsCallResult.ok(id, result.toJson(), elapsed(started));
+                command -> {
+                    try { return controlledDispatch(() -> startService(command)); }
+                    catch (ControlOwnership.Unavailable | OperationFailure e) {
+                        dispatchFailure.set(e);
+                        throw e;
+                    }
+                });
+        if (dispatchFailure.get() != null) throw dispatchFailure.get();
+        String outcome = result.ok ? "completed"
+                : requestMutationAccepted.get() || "termux_start_failed".equals(result.code) ? "unknown" : "not_applied";
+        String body = result.toJson();
+        return WsCallResult.ok(id, body.substring(0, body.length() - 1)
+                + ",\"outcome\":\"" + outcome + "\"}", elapsed(started));
     }
 
     private WsCallResult executeUiObserve(String id, Map<String, String> params, long started) {
@@ -1563,7 +1667,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private static void sendWsError(WsSession session, String id, String code, String message) throws IOException {
         session.sendText("{\"type\":\"error\",\"id\":\"" + escape(id == null ? "" : id) + "\",\"ok\":false,\"code\":\"" +
-                escape(code) + "\",\"message\":\"" + escape(message) + "\"}");
+                escape(code) + "\",\"message\":\"" + escape(message) + "\",\"outcome\":\"not_applied\"}");
     }
 
     private static boolean headerContains(String value, String needle) {
@@ -2365,9 +2469,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
         SearchOptions options = SearchOptions.from(params);
         int timeout = intParam(params, "timeout", 5000);
         int interval = Math.max(20, intParam(params, "interval", 100));
-        long end = System.currentTimeMillis() + timeout;
+        long end = SystemClock.elapsedRealtime() + timeout;
         Match match = null;
-        while (System.currentTimeMillis() < end) {
+        while (SystemClock.elapsedRealtime() < end) {
+            checkDeadline();
             match = findMatch(options, constraint);
             if (waitGone) {
                 if (match == null) return json(200, "{\"ok\":true,\"gone\":true}");
@@ -2393,8 +2498,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
         OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
         if (!constraint.valid) return targetConstraintError(constraint);
-        Match match = findEditableMatch(options, constraint);
-        if (match == null) match = findFocusedEditable(constraint);
+        Match match = options.needle.isEmpty() ? findFocusedEditable(constraint)
+                : findEditableMatch(options, constraint);
         if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
         showPointGesture(match.centerX(), match.centerY());
         Bundle args = new Bundle();
@@ -2559,7 +2664,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             controlledStartActivity(intent);
             performanceMetrics.recordLaunchDispatch(System.nanoTime() - dispatchStartedNanos, true);
             return json(200, "{\"ok\":true}");
-        } catch (ControlOwnership.Unavailable e) {
+        } catch (ControlOwnership.Unavailable | OperationFailure e) {
             throw e;
         } catch (Exception e) {
             performanceMetrics.recordLaunchDispatch(System.nanoTime() - dispatchStartedNanos, false);
@@ -2583,7 +2688,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             checkControl();
             controlledStartActivity(intent);
             return json(200, "{\"ok\":true}");
-        } catch (ControlOwnership.Unavailable e) {
+        } catch (ControlOwnership.Unavailable | OperationFailure e) {
             throw e;
         } catch (Exception e) {
             return json(500, "{\"ok\":false,\"error\":\"" + escape(e.getClass().getSimpleName()) + "\"}");
@@ -2636,10 +2741,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
             controlledStartActivity(intent);
             return WsCallResult.ok(id,
                     "{\"ok\":true,\"resolved\":true,\"dispatched\":true}", elapsed(started));
-        } catch (ControlOwnership.Unavailable e) {
+        } catch (ControlOwnership.Unavailable | OperationFailure e) {
             throw e;
         } catch (RuntimeException e) {
-            return WsCallResult.error(id, "start_failed", "start_failed", elapsed(started));
+            return WsCallResult.failure(id, "start_failed", failureOutcome("not_applied"), elapsed(started));
         }
     }
 
@@ -3077,7 +3182,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Match findMatch(SearchOptions options, OperationTargetConstraint constraint) {
-        if (options.needle.isEmpty()) return null;
+        if (options.needle.isEmpty()) throw new OperationFailure("invalid_selector", 400, "not_applied");
         return findAcrossWindows(options, constraint, MATCH_ANY);
     }
 
@@ -3085,41 +3190,70 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return findAcrossWindows(options, constraint, MATCH_EDITABLE);
     }
 
-    private Match findEditableMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target) {
+    private Match findEditableMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target,
+            SearchCoverage coverage, int depth) {
+        if (!coverage.visit(depth)) return null;
         if (node.isEditable() && nodeMatches(node, options)) return Match.from(node, target);
-        for (int i = 0; i < node.getChildCount(); i++) {
+        for (int i = 0; i < node.getChildCount() && coverage.hasBudget(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            Match match = findEditableMatch(child, options, target);
-            child.recycle();
+            if (child == null) { coverage.unavailable(); continue; }
+            Match match;
+            try { match = findEditableMatch(child, options, target, coverage, depth + 1); }
+            finally { child.recycle(); }
             if (match != null) return match;
         }
         return null;
     }
 
     private Match findFocusedEditable(OperationTargetConstraint constraint) {
-        return findAcrossWindows(null, constraint, MATCH_FOCUSED_EDITABLE);
+        TargetSnapshot target = resolveTarget(constraint, true);
+        if (target == null) throw new OperationFailure("tree_unavailable", 503, "not_applied");
+        try {
+            AccessibilityNodeInfo focused = target.root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (focused != null) {
+                try {
+                    if (focused.getWindowId() != target.windowId)
+                        throw new OperationFailure("stale_target", 409, "not_applied");
+                    if (focused.isEditable()) return Match.from(focused, target.ref());
+                } finally {
+                    focused.recycle();
+                }
+            }
+            SearchCoverage coverage = new SearchCoverage();
+            Match match = findFocusedEditable(target.root, target.ref(), coverage, 0);
+            if (match == null && !coverage.provesAbsence())
+                throw new OperationFailure("tree_unavailable", 503, "not_applied");
+            return match;
+        } finally {
+            target.root.recycle();
+        }
     }
 
-    private Match findFocusedEditable(AccessibilityNodeInfo node, TargetRef target) {
+    private Match findFocusedEditable(AccessibilityNodeInfo node, TargetRef target,
+            SearchCoverage coverage, int depth) {
+        if (!coverage.visit(depth)) return null;
         if (node.isEditable() && node.isFocused()) return Match.from(node, target);
-        for (int i = 0; i < node.getChildCount(); i++) {
+        for (int i = 0; i < node.getChildCount() && coverage.hasBudget(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            Match match = findFocusedEditable(child, target);
-            child.recycle();
+            if (child == null) { coverage.unavailable(); continue; }
+            Match match;
+            try { match = findFocusedEditable(child, target, coverage, depth + 1); }
+            finally { child.recycle(); }
             if (match != null) return match;
         }
         return null;
     }
 
-    private Match findMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target) {
+    private Match findMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target,
+            SearchCoverage coverage, int depth) {
+        if (!coverage.visit(depth)) return null;
         if (nodeMatches(node, options)) return Match.from(node, target);
-        for (int i = 0; i < node.getChildCount(); i++) {
+        for (int i = 0; i < node.getChildCount() && coverage.hasBudget(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) continue;
-            Match match = findMatch(child, options, target);
-            child.recycle();
+            if (child == null) { coverage.unavailable(); continue; }
+            Match match;
+            try { match = findMatch(child, options, target, coverage, depth + 1); }
+            finally { child.recycle(); }
             if (match != null) return match;
         }
         return null;
@@ -3127,47 +3261,55 @@ public class HenyoAccessibilityService extends AccessibilityService {
 
     private static final int MATCH_ANY = 0;
     private static final int MATCH_EDITABLE = 1;
-    private static final int MATCH_FOCUSED_EDITABLE = 2;
 
     private Match findAcrossWindows(SearchOptions options, OperationTargetConstraint constraint, int mode) {
         List<AccessibilityWindowInfo> windows = allWindows();
-        if (windows.isEmpty()) return null;
-        long now = SystemClock.elapsedRealtime();
-        List<TargetHistoryStore.WindowHint> history = targetHistoryStore.hints(
-                currentTargetContextId(), now);
-        List<WindowTargetResolver.Candidate> candidates = windowProbeCandidates(windows);
-        List<Integer> ordered = WindowProbePlanner.order(candidates, constraint, history,
-                preferredTargetWindowId, preferredTargetDisplayId);
-        Set<String> excludedPackages = ExcludedAppStore.load(this);
+        if (windows.isEmpty()) throw new OperationFailure("tree_unavailable", 503, "not_applied");
+        SearchCoverage coverage = new SearchCoverage();
         Match result = null;
-        long probeStarted = SystemClock.elapsedRealtime();
-        for (int selected : ordered) {
-            long timeoutMs = WindowRootProbeBudget.nextTimeoutMs(
-                    probeStarted, SystemClock.elapsedRealtime());
-            if (timeoutMs <= 0L) break;
-            AccessibilityWindowInfo window = windows.get(selected);
-            AccessibilityNodeInfo root = windowRoot(window, timeoutMs);
-            if (root == null) continue;
-            String packageName = str(root.getPackageName());
-            if (packageName.isEmpty() || excludedPackages.contains(packageName)
-                    || (constraint != null && constraint.hasPackage()
-                    && !constraint.packageName.equals(packageName))) {
-                root.recycle();
-                continue;
+        try {
+            long now = SystemClock.elapsedRealtime();
+            List<TargetHistoryStore.WindowHint> history = targetHistoryStore.hints(currentTargetContextId(), now);
+            List<WindowTargetResolver.Candidate> candidates = windowProbeCandidates(windows);
+            List<Integer> ordered = WindowProbePlanner.order(candidates, constraint, history,
+                    preferredTargetWindowId, preferredTargetDisplayId);
+            Set<String> excludedPackages = ExcludedAppStore.load(this);
+            long probeStarted = SystemClock.elapsedRealtime();
+            for (int selected : ordered) {
+                checkDeadline();
+                if (!coverage.hasBudget()) break;
+                long timeoutMs = WindowRootProbeBudget.nextTimeoutMs(probeStarted, SystemClock.elapsedRealtime());
+                if (timeoutMs <= 0L) { coverage.unavailable(); break; }
+                AccessibilityNodeInfo root = windowRoot(windows.get(selected), timeoutMs);
+                if (root == null) { coverage.unavailable(); continue; }
+                try {
+                    String packageName = str(root.getPackageName());
+                    if (packageName.isEmpty()) { coverage.unavailable(); continue; }
+                    if (excludedPackages.contains(packageName)
+                            || (constraint != null && constraint.hasPackage()
+                            && !constraint.packageName.equals(packageName))) continue;
+                    TargetSnapshot snapshot = targetSnapshot(windows, selected, root, packageName);
+                    TargetRef target = snapshot.ref();
+                    if (mode == MATCH_EDITABLE) result = findEditableMatch(root, options, target, coverage, 0);
+                    else result = findMatch(root, options, target, coverage, 0);
+                    if (result != null) {
+                        acceptResolvedTarget(snapshot);
+                        break;
+                    }
+                } catch (OperationFailure e) {
+                    throw e;
+                } catch (RuntimeException e) {
+                    if (result != null) { result.recycle(); result = null; }
+                    coverage.unavailable();
+                } finally {
+                    root.recycle();
+                }
             }
-            TargetSnapshot snapshot = targetSnapshot(windows, selected, root, packageName);
-            TargetRef target = snapshot.ref();
-            if (mode == MATCH_EDITABLE) result = findEditableMatch(root, options, target);
-            else if (mode == MATCH_FOCUSED_EDITABLE) result = findFocusedEditable(root, target);
-            else result = findMatch(root, options, target);
-            if (result != null) {
-                acceptResolvedTarget(snapshot);
-                root.recycle();
-                break;
-            }
-            root.recycle();
+        } finally {
+            recycleWindows(windows);
         }
-        recycleWindows(windows);
+        if (result == null && !coverage.provesAbsence())
+            throw new OperationFailure("tree_unavailable", 503, "not_applied");
         return result;
     }
 
@@ -3792,16 +3934,6 @@ public class HenyoAccessibilityService extends AccessibilityService {
         } catch (NumberFormatException ignored) {
             return fallback;
         }
-    }
-
-    private static String jsonObjectWithDefaultNumber(String json, String key, String value) {
-        if (parseJsonObject(json).containsKey(key)) return json;
-        String cleanValue = value == null ? "" : value.trim();
-        if (!cleanValue.matches("[0-9]+")) return json;
-        String body = json == null || json.trim().isEmpty() ? "{}" : json.trim();
-        if (!body.startsWith("{") || !body.endsWith("}")) return json;
-        if ("{}".equals(body)) return "{\"" + key + "\":" + cleanValue + "}";
-        return body.substring(0, body.length() - 1) + ",\"" + key + "\":" + cleanValue + "}";
     }
 
     private static String stripJsonObjectFields(String json, String... names) {
@@ -4554,14 +4686,21 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final String code;
         final String message;
         final long durationMs;
+        final String outcome;
 
         private WsCallResult(String id, boolean ok, String resultJson, String code, String message, long durationMs) {
+            this(id, ok, resultJson, code, message, durationMs, "");
+        }
+
+        private WsCallResult(String id, boolean ok, String resultJson, String code, String message,
+                long durationMs, String outcome) {
             this.id = id == null ? "" : id;
             this.ok = ok;
             this.resultJson = resultJson == null || resultJson.isEmpty() ? "{}" : resultJson;
             this.code = code == null ? "" : code;
             this.message = message == null ? "" : message;
             this.durationMs = durationMs;
+            this.outcome = outcome;
         }
 
         static WsCallResult ok(String id, String resultJson, long durationMs) {
@@ -4569,7 +4708,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
 
         static WsCallResult error(String id, String code, String message, long durationMs) {
-            return new WsCallResult(id, false, "{}", code, message, durationMs);
+            return new WsCallResult(id, false, "{}", code, message, durationMs, "not_applied");
+        }
+
+        static WsCallResult failure(String id, String code, String outcome, long durationMs) {
+            return new WsCallResult(id, false, "{}", code, code, durationMs, outcome);
+        }
+
+        private String outcomeJson() {
+            return outcome.isEmpty() ? "" : ",\"outcome\":\"" + escape(outcome) + "\"";
         }
 
         String toFrameJson() {
@@ -4578,7 +4725,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         resultJson + ",\"durationMs\":" + durationMs + "}";
             }
             return "{\"type\":\"error\",\"id\":\"" + escape(id) + "\",\"ok\":false,\"code\":\"" +
-                    escape(code) + "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + "}";
+                    escape(code) + "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + outcomeJson() + "}";
         }
 
         String toStepJson() {
@@ -4587,7 +4734,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         ",\"durationMs\":" + durationMs + "}";
             }
             return "{\"id\":\"" + escape(id) + "\",\"ok\":false,\"code\":\"" + escape(code) +
-                    "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + "}";
+                    "\",\"message\":\"" + escape(message) + "\",\"durationMs\":" + durationMs + outcomeJson() + "}";
         }
     }
 

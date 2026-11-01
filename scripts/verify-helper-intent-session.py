@@ -4,6 +4,7 @@
 import contextlib
 import io
 import json
+import socket
 import sys
 import tempfile
 import threading
@@ -116,6 +117,8 @@ def verify_ws_payloads():
     assert captured[0]["timeoutMs"] == 120_000
     assert captured[1]["display"] == {"summary": "メッセージを送ります"}
     assert captured[1]["steps"] == steps
+    for frame in captured[2:]:
+        assert frame.pop("timeoutMs") == 10_000
     assert captured[2] == {
         "type": "call", "id": captured[2]["id"], "op": "task.progress.set",
         "params": {"goal": "3件確認", "steps": plan, "replan": True},
@@ -379,7 +382,7 @@ def verify_disconnect_semantics():
         "input.key", {"key": "ENTER"}, action_id="one-shot-action",
         timeout=0.01, expected_service_epoch="one-shot-epoch",
     )
-    assert response == {"ok": False, "error": "timeout"}
+    assert response == {"ok": False, "error": "timeout", "outcome": "unknown", "retrySafe": False}
     assert timed_out.send_count == 1
     assert not ws.pending
 
@@ -489,11 +492,41 @@ def verify_concurrent_lazy_connect():
         assert eager_connects == []
 
 
+def verify_blocked_reader_shutdown():
+    client, peer = socket.socketpair()
+    entered = threading.Event()
+    finished = threading.Event()
+    def receive():
+        entered.set()
+        try:
+            client.recv(1)
+        except OSError:
+            pass
+        finally:
+            finished.set()
+    reader = threading.Thread(target=receive, daemon=True)
+    ws = helper.WsClient("ws://127.0.0.1:8765/v1/ws/control", "", lambda _event: None)
+    ws.sock = client
+    try:
+        reader.start()
+        assert entered.wait(1)
+        time.sleep(0.02)
+        ws.close()
+        assert finished.wait(1), "close must unblock a pending receive"
+        peer.settimeout(1)
+        assert peer.recv(1) == b"", "peer must immediately observe disconnection"
+    finally:
+        client.close()
+        peer.close()
+        reader.join(timeout=1)
+
+
 def main():
     verify_ws_payloads()
     verify_helper_forwarding()
     verify_cli_forwarding()
     verify_disconnect_semantics()
+    verify_blocked_reader_shutdown()
     verify_generation_handoff_is_atomic()
     verify_concurrent_lazy_connect()
     print("helper intent/session verifier passed")

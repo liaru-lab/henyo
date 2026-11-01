@@ -94,7 +94,7 @@ def verify_ws_payload():
     finally:
         helper.encode_client_text = original_encode
 
-    assert "timeoutMs" not in captured[0]
+    assert captured[0]["timeoutMs"] == 20_000
     assert captured[1]["timeoutMs"] == 25_000
     assert captured[2]["timeoutMs"] == 300_000
     assert RecordingQueue.waits == [20.0, 30.0, 305.0]
