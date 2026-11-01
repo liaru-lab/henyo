@@ -286,6 +286,7 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyTargetAccess"
     dependsOn "verifyControlLatency", "verifyGestureGuard", "verifyPerformanceMetrics"
     dependsOn "verifyObservationEffects", "verifyAgentVisualModel"
     dependsOn "verifyConnectionOverlay"
@@ -459,4 +460,9 @@ tasks.register("verifyPerformanceMetrics", Exec) {
 
 tasks.register("verifyGestureGuard", Exec) {
     commandLine "python", "scripts/verify-gesture-guard.py"
+}
+
+
+tasks.register("verifyTargetAccess", Exec) {
+    commandLine "python", "scripts/verify-target-access.py"
 }

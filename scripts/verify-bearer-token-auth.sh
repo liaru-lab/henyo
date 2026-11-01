@@ -307,6 +307,7 @@ javac -encoding UTF-8 -source 11 -target 11 \
   src/main/java/link/liaru/henyo/BearerTokenManager.java \
   src/main/java/link/liaru/henyo/WsOperation.java \
   src/main/java/link/liaru/henyo/SensitiveUiAccessPolicy.java \
+  src/main/java/link/liaru/henyo/SensitiveTreeInspector.java \
   "$tmp/link/liaru/henyo/BearerTokenManagerVerifier.java"
 
 java -cp "$tmp:$android_jar" link.liaru.henyo.BearerTokenManagerVerifier

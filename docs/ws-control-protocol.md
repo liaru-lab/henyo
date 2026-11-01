@@ -45,8 +45,21 @@ model as authenticated HTTP control endpoints.
 - Token-less localhost compatibility remains locally trusted. A localhost
   session that authenticates as a paired client follows that client's
   `sensitive-ui-control` setting.
-- The same check applies to both `/v1/ui/*` and `/v1/screen/*` HTTP routes and
-  their temporary legacy `/ui/*` and `/screen/*` aliases.
+- Checks follow each actual root used for observation, search or dispatch.
+  Incomplete inspection (including an unavailable child or exhausted traversal
+  budget) requires the same capability. Tree metadata and push filtering use the
+  same resolved root as the payload. Current-app metadata follows this boundary.
+- The same check applies to HTTP UI/capture routes and their temporary legacy
+  aliases. Whole-display captures inspect the display's windows; prefer window
+  capture when only one application is needed.
+- Paired HTTP and WS UI access requires `control`, even on localhost. A valid
+  token without this scope returns `control_permission_required`. An explicitly
+  supplied invalid credential never falls back to anonymous localhost access. Dedicated
+  wireless ADB discovery and token-management endpoints retain their independent
+  scopes. Token-less localhost compatibility remains trusted.
+- Revocation and scope reductions close affected live connections and invalidate
+  pending ownership. Delivery and native dispatch also re-check current scopes;
+  already-submitted input may have an unknown outcome.
 - For token-less remote sessions, the first successful `auth` frame switches the
   session to authenticated; all other control operations should return
   `auth_required` until that succeeds.
@@ -90,9 +103,11 @@ Errors:
 Standard codes include `bad_request`, `auth_required`, `auth_malformed`,
 `auth_invalid`, `auth_revoked`, `source_not_allowed`, `op_unknown`,
 `op_invalid`, `op_timeout`, `batch_timeout`, `accessibility_unavailable`, and
-`internal_error`. `sensitive_ui_permission_required` means Android marked the
-active UI as accessibility-sensitive and the paired client lacks the local
-opt-in capability.
+`internal_error`. `sensitive_ui_permission_required` means the actual read or
+operation includes accessibility-sensitive UI, or inspection could not establish
+its absence, and the paired client lacks the local opt-in capability.
+`control_permission_required` distinguishes a missing control scope from an
+invalid or revoked credential.
 
 ## Session Frames
 

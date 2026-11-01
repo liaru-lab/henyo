@@ -891,6 +891,7 @@ components:
         - stale_target
         - control_stopped
         - control_owned
+        - control_permission_required
         - token_management_permission_required
         - sensitive_ui_permission_required
         - op_failed

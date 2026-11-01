@@ -397,6 +397,7 @@ public class MainActivity extends Activity {
                     if (enabled && checkSelfPermission(TERMUX_RUN_COMMAND_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
                         requestPermissions(new String[]{TERMUX_RUN_COMMAND_PERMISSION}, REQUEST_TERMUX_RUN_COMMAND);
                     }
+                    if (!enabled) HenyoAccessibilityService.clientRevoked(record.id);
                     showMessage((enabled ? "Enabled" : "Disabled") + " Termux commands for " + record.name);
                     updateStatus();
                 });
@@ -415,6 +416,7 @@ public class MainActivity extends Activity {
                     if (!manager.setScope(record.id, BearerTokenManager.SCOPE_SENSITIVE_UI_CONTROL, false)) {
                         showMessage("Could not update protected control permission for " + record.name);
                     } else {
+                        HenyoAccessibilityService.clientRevoked(record.id);
                         showMessage("Disabled protected Android controls for " + record.name);
                     }
                     updateStatus();
@@ -430,6 +432,7 @@ public class MainActivity extends Activity {
                     if (!manager.setScope(record.id, BearerTokenManager.SCOPE_ADB_WIRELESS_ENDPOINT, enabled)) {
                         showMessage("Could not update wireless ADB permission for " + record.name);
                     } else {
+                        if (!enabled) HenyoAccessibilityService.clientRevoked(record.id);
                         showMessage((enabled ? "Enabled" : "Disabled") + " wireless ADB discovery for " + record.name);
                     }
                     updateStatus();
