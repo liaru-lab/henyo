@@ -26,9 +26,12 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class BearerTokenManagerVerifier {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         MemoryPrefs prefs = new MemoryPrefs();
         BearerTokenManager manager = new BearerTokenManager(prefs, new SecureRandom());
 
@@ -102,7 +105,43 @@ public final class BearerTokenManagerVerifier {
         expect(SensitiveUiAccessPolicy.allows(true, true, false), false, "paired client denied by default");
         expect(SensitiveUiAccessPolicy.allows(true, true, true), true, "locally authorized paired client allowed");
 
+        verifyConcurrentManagers();
         System.out.println("bearer token manager verifier passed");
+    }
+
+    private static void verifyConcurrentManagers() throws Exception {
+        MemoryPrefs prefs = new MemoryPrefs();
+        BearerTokenManager service = new BearerTokenManager(prefs, new SecureRandom());
+        BearerTokenManager activity = new BearerTokenManager(prefs, new SecureRandom());
+        BearerTokenManager.CreatedToken created = service.create("Synthetic concurrent client", null);
+        prefs.pauseVerification = true;
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread verification = new Thread(() -> {
+            try { service.verify(created.token, "synthetic-source"); }
+            catch (Throwable error) { failure.set(error); }
+        }, "verification-worker");
+        Thread revocation = new Thread(() -> {
+            try { activity.revoke(created.record.id); }
+            catch (Throwable error) { failure.set(error); }
+        }, "revocation-worker");
+        verification.start();
+        try {
+            expect(prefs.verificationWrite.await(2, TimeUnit.SECONDS), true, "verification reached persistence");
+            revocation.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (revocation.isAlive() && revocation.getState() != Thread.State.BLOCKED
+                    && System.nanoTime() < deadline) Thread.yield();
+            expect(revocation.getState() == Thread.State.BLOCKED, true,
+                    "other manager waits for the complete record transaction");
+        } finally {
+            prefs.allowVerificationWrite.countDown();
+            verification.join(2000);
+            revocation.join(2000);
+        }
+        if (failure.get() != null) throw new AssertionError("concurrent token update", failure.get());
+        expect(verification.isAlive() || revocation.isAlive(), false, "record workers completed");
+        expect(service.verify(created.token, "synthetic-source").revoked, true,
+                "verification cannot overwrite revocation from another manager");
     }
 
     private static void expect(Object actual, Object expected, String label) {
@@ -119,6 +158,9 @@ public final class BearerTokenManagerVerifier {
 
     private static final class MemoryPrefs implements SharedPreferences {
         private final Map<String, Object> values = new HashMap<>();
+        volatile boolean pauseVerification;
+        final CountDownLatch verificationWrite = new CountDownLatch(1);
+        final CountDownLatch allowVerificationWrite = new CountDownLatch(1);
 
         @Override
         public Map<String, ?> getAll() {
@@ -186,6 +228,15 @@ public final class BearerTokenManagerVerifier {
 
             @Override
             public Editor putString(String key, String value) {
+                if (pauseVerification && Thread.currentThread().getName().equals("verification-worker")) {
+                    verificationWrite.countDown();
+                    try {
+                        if (!allowVerificationWrite.await(3, TimeUnit.SECONDS))
+                            throw new AssertionError("verification was not released");
+                    } catch (InterruptedException error) {
+                        throw new AssertionError(error);
+                    }
+                }
                 pending.put(key, value);
                 return this;
             }

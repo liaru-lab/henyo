@@ -88,9 +88,9 @@ if "/v1/app/open-uri" in service or "/v1/app/openUri" in service:
 dispatch = service.split("private WsCallResult executeWsOpenUri", 1)[1].split(
     "private Response appCurrent", 1
 )[0]
-if dispatch.count("startActivity(intent)") != 1:
-    raise AssertionError("dispatch must contain exactly one startActivity call")
-if dispatch.index("intent.resolveActivity") > dispatch.index("startActivity(intent)"):
+if dispatch.count("controlledStartActivity(intent)") != 1:
+    raise AssertionError("dispatch must contain exactly one guarded startActivity call")
+if dispatch.index("intent.resolveActivity") > dispatch.index("controlledStartActivity(intent)"):
     raise AssertionError("resolution must precede dispatch")
 if "Log." in dispatch or "params.uri +" in dispatch or "escape(params.uri)" in dispatch:
     raise AssertionError("raw URI must not be logged or serialized")
