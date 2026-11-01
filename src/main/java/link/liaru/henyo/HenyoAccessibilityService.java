@@ -958,6 +958,19 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         session.sessionToken, BearerTokenManager.SCOPE_CONTROL)))) {
             return WsCallResult.error(id, "auth_revoked", "Client access is no longer active", elapsed(started));
         }
+        if (WsOperation.OP_TASK_START.equals(spec.op)) {
+            String taskId = requestTaskId.get();
+            if (taskId == null || taskId.isEmpty())
+                throw new OperationFailure("task_id_required", 400, "not_applied");
+            synchronized (controlOwnership) {
+                TaskLifecycle.Token activeTask = taskLifecycle.active(currentTargetContextId());
+                if (activeTask != null && !activeTask.id.equals(taskId))
+                    throw new OperationFailure("task_in_progress", 409, "not_applied");
+                checkControl();
+            }
+            noteControlActivity("");
+            return WsCallResult.ok(id, "{\"ok\":true,\"taskId\":\"" + escape(taskId) + "\"}", elapsed(started));
+        }
         if (("POST".equals(spec.httpMethod) && !WsOperation.OP_UI_FIND.equals(spec.op)
                 && !WsOperation.OP_UI_WAIT.equals(spec.op)) || WsOperation.OP_TERMUX_EXEC.equals(spec.op)
                 || WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)) checkControl();

@@ -31,6 +31,7 @@ public final class WsOperation {
     public static final String OP_GLOBAL_HOME = "global.home";
     public static final String OP_SCREEN_SCREENSHOT = "screen.screenshot";
     public static final String OP_TERMUX_EXEC = "termux.exec";
+    public static final String OP_TASK_START = "task.start";
     public static final String OP_TASK_PROGRESS_SET = "task.progress.set";
     public static final String OP_TASK_PROGRESS_FINISH = "task.progress.finish";
     public static final String OP_TASK_COMPLETION_SHOW = "task.completion.show";
@@ -54,6 +55,7 @@ public final class WsOperation {
     public static final OperationSpec SPEC_GLOBAL_HOME = spec(OP_GLOBAL_HOME, "POST", "/v1/global/home", false);
     public static final OperationSpec SPEC_SCREEN_SCREENSHOT = spec(OP_SCREEN_SCREENSHOT, "GET", "/v1/screen/screenshot", true);
     public static final OperationSpec SPEC_TERMUX_EXEC = spec(OP_TERMUX_EXEC, "POST", "/v1/termux/exec", false);
+    public static final OperationSpec SPEC_TASK_START = spec(OP_TASK_START, "WS", OP_TASK_START, false);
     public static final OperationSpec SPEC_TASK_PROGRESS_SET = spec(OP_TASK_PROGRESS_SET, "WS", OP_TASK_PROGRESS_SET, false);
     public static final OperationSpec SPEC_TASK_PROGRESS_FINISH = spec(OP_TASK_PROGRESS_FINISH, "WS", OP_TASK_PROGRESS_FINISH, false);
     public static final OperationSpec SPEC_TASK_COMPLETION_SHOW = spec(OP_TASK_COMPLETION_SHOW, "WS", OP_TASK_COMPLETION_SHOW, false);
@@ -82,6 +84,7 @@ public final class WsOperation {
         ops.add(OP_GLOBAL_HOME);
         ops.add(OP_SCREEN_SCREENSHOT);
         ops.add(OP_TERMUX_EXEC);
+        ops.add(OP_TASK_START);
         ops.add(OP_TASK_PROGRESS_SET);
         ops.add(OP_TASK_PROGRESS_FINISH);
         ops.add(OP_TASK_COMPLETION_SHOW);
@@ -107,6 +110,7 @@ public final class WsOperation {
         addSpec(specs, SPEC_GLOBAL_HOME);
         addSpec(specs, SPEC_SCREEN_SCREENSHOT);
         addSpec(specs, SPEC_TERMUX_EXEC);
+        addSpec(specs, SPEC_TASK_START);
         addSpec(specs, SPEC_TASK_PROGRESS_SET);
         addSpec(specs, SPEC_TASK_PROGRESS_FINISH);
         addSpec(specs, SPEC_TASK_COMPLETION_SHOW);

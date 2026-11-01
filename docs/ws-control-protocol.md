@@ -234,6 +234,20 @@ on mutating batches. Raw clients must provide the same ID when finishing.
 Legacy mutations without an ID remain accepted, but completion requires
 migration to task IDs (`task_id_required`); malformed IDs use `task_id_invalid`.
 
+Use `task.start` before an observation-only task. It requires a fresh top-level
+`taskId`, claims ownership using the same stop, scope and deadline checks as
+mutations, and returns `result.taskId`. Repeating the active ID is idempotent;
+a different ID while that owner has active work returns `task_in_progress`.
+Finish active work before beginning another task. A completed current ID returns
+`stale_task`. Ordinary reads do not start tasks or restore dismissed content.
+The helper's `start_task()` and `henyo task start` allocate a fresh ID after
+completion and preserve an already active helper task. Use the same ID for
+subsequent reads and completion; helpers attach it where required automatically.
+
+```json
+{"type":"call","id":"start-1","op":"task.start","taskId":"task-example-1","params":{}}
+```
+
 `task.progress.set` accepts an ordered structured plan snapshot:
 
 ```json

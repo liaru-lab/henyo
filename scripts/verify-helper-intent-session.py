@@ -58,6 +58,9 @@ class RecorderWs:
         })
         return {"type": "result", "ok": True, "result": {"ok": True}}
 
+    def start_task(self):
+        return self.call("task.start", {})
+
     def set_progress(self, goal="", completed=None, current="", steps=None, replan=False):
         if steps is not None:
             self.progress.append(("plan", goal, list(steps), replan))
@@ -142,6 +145,49 @@ def verify_ws_payloads():
         "type": "call", "id": captured[5]["id"], "op": "task.completion.show",
         "params": {"message": "完了しました。"},
     }
+
+
+def verify_observation_only_tasks():
+    original_encode = helper.encode_client_text
+    captured = []
+    ws = helper.WsClient("ws://127.0.0.1:8765/v1/ws/control", "", lambda event: None)
+    ws.sock = PassiveSocket()
+    def capture(payload):
+        captured.append(dict(payload))
+        ws.pending[payload["id"]].put({"ok": True})
+        return b"frame"
+    helper.encode_client_text = capture
+    try:
+        assert ws.call("ui.tree", {})["ok"] and not ws.task_id
+        assert "taskId" not in captured[-1], "background reads cannot start tasks"
+        assert ws.start_task()["ok"]
+        first = ws.task_id
+        assert first and ws.start_task()["ok"] and ws.task_id == first, "active start is idempotent"
+        assert ws.call("ui.tree", {})["ok"] and ws.task_id == first
+        assert ws.show_completion("Synthetic first result")["ok"]
+        assert not ws.task_id and ws.completed_task_id == first
+        assert ws.call("ui.tree", {})["ok"] and not ws.task_id
+        assert ws.show_completion("Synthetic first result")["ok"] and captured[-1]["taskId"] == first
+        assert ws.start_task()["ok"]
+        second = ws.task_id
+        assert second and second != first and not ws.completed_task_id
+        assert ws.call("app.current", {})["ok"] and ws.task_id == second
+        assert ws.show_completion("Synthetic second result")["ok"] and captured[-1]["taskId"] == second
+        ws.close(); assert not ws.task_id and not ws.completed_task_id
+    finally:
+        helper.encode_client_text = original_encode
+    daemon = helper.HelperDaemon(ROOT / "build" / "verify-observation-task.sock")
+    daemon.ws = RecorderWs()
+    assert daemon.dispatch({"cmd":"task.start"})["ok"]
+    assert daemon.ws.calls[-1]["op"] == "task.start"
+    original_request = cli.helper_request
+    requests = []
+    cli.helper_request = lambda payload: requests.append(payload) or {"ok":True}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()): assert cli.main(["task","start"]) == 0
+        assert requests == [{"cmd":"task.start"}]
+    finally:
+        cli.helper_request = original_request
 
 
 def verify_helper_forwarding():
@@ -543,3 +589,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+verify_observation_only_tasks()

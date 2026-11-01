@@ -69,7 +69,7 @@ KNOWN_CAPABILITY_OPERATIONS = frozenset({
     "ui.scroll", "ui.scrollUntil", "ui.wait", "ui.observe",
     "app.current", "app.list", "app.launch", "app.openUri", "app.start", "app.activate",
     "global.back", "global.home", "screen.screenshot", "termux.exec",
-    "input.text", "input.key", "task.progress.set", "task.progress.finish",
+    "input.text", "input.key", "task.start", "task.progress.set", "task.progress.finish",
     "task.completion.show", "session.wakeHint",
 })
 KNOWN_COORDINATE_SPACES = frozenset({"screen", "screenshot"})
@@ -101,7 +101,7 @@ CALL_REQUEST_FIELDS = frozenset({
     "targetIdentity",
 })
 TARGET_BOUND_COMMANDS = frozenset({
-    "session.status", "tree", "current", "observe", "progress.set",
+    "session.status", "tree", "current", "observe", "task.start", "progress.set",
     "progress.finish", "completion.show", "call", "batch", "auth.reload",
 })
 WINDOW_TARGET_FIELDS = frozenset({"package", "windowId", "displayId"})
@@ -474,7 +474,7 @@ BATCH_MUTATING_OPS = frozenset({
 })
 
 TASK_MUTATING_OPS = BATCH_MUTATING_OPS | frozenset({
-    "app.activate", "termux.exec", "input.text", "input.key", "task.progress.set",
+    "app.activate", "termux.exec", "input.text", "input.key", "task.start", "task.progress.set",
 })
 TASK_FINISH_OPS = frozenset({"task.progress.finish", "task.completion.show"})
 
@@ -883,6 +883,10 @@ class WsClient:
         finally:
             with self.lock:
                 self.pending.pop(request_id, None)
+
+    def start_task(self) -> Dict[str, Any]:
+        """Begin observation-only work; an active helper task keeps its identity."""
+        return self.call("task.start", {})
 
     def set_progress(self, goal: str = "", completed=None, current: str = "",
                      steps=None, replan: bool = False) -> Dict[str, Any]:
@@ -1589,6 +1593,11 @@ class HelperDaemon:
                 # payload in the helper cache.
                 return {"ok": False, "error": "unstable_observation", "result": result}
             return result
+        if cmd == "task.start":
+            response = self.ws.start_task()
+            if response.get("error") in ("ws_disconnected", "ws_unavailable"):
+                self.handle_disconnect(response["error"])
+            return response
         if cmd == "progress.set":
             goal = request.get("goal", "")
             if "steps" in request:
@@ -1802,7 +1811,7 @@ def helper_read_timeout(payload: Dict[str, Any]) -> float:
         return max(requested, env_timeout("HENYO_HELPER_READ_TIMEOUT", requested))
     if cmd == "session.status":
         return env_timeout("HENYO_HELPER_READ_TIMEOUT", 45.0)
-    if cmd in ("call", "tree", "current", "progress.set", "progress.finish",
+    if cmd in ("call", "tree", "current", "task.start", "progress.set", "progress.finish",
                "completion.show"):
         return env_timeout("HENYO_HELPER_READ_TIMEOUT", 15.0)
     return env_timeout("HENYO_HELPER_FAST_READ_TIMEOUT", 2.0)

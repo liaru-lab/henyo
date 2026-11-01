@@ -129,6 +129,12 @@ internal tree reads and settling checks do not need separate messages.
 
 ## Task Progress Presentation
 
+Before a new observation-only task, run `bin/henyo task start`. This creates a
+fresh identity after the preceding task completes, so a second result can be
+shown on the same helper connection. Ordinary reads alone do not start a task.
+Starting an active helper task is idempotent; finish it before beginning another
+one. Finish observation-only work with the normal completion command below.
+
 For a multi-step task, set one ordered full plan snapshot through the normal
 persistent helper before or during work:
 

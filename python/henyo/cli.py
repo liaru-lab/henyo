@@ -956,6 +956,7 @@ def usage() -> None:
   henyo helper start|stop|status|logs
   henyo helper reload-auth
   henyo cache tree|clear
+  henyo task start
   henyo progress set --goal TEXT [--step STATUS TEXT ...] [--replan]
   henyo progress set [--goal TEXT] [--completed TEXT ...] [--current TEXT]
   henyo progress finish
@@ -1001,6 +1002,10 @@ def main(argv=None) -> int:
         if rest and rest[0] == "clear":
             return print_json(helper_request({"cmd": "cache.clear"}))
         usage(); return 2
+    if cmd == "task":
+        if rest != ["start"]:
+            usage(); return 2
+        return print_json(helper_request({"cmd": "task.start"}))
     if cmd == "completion":
         if len(rest) != 2 or rest[0] != "show":
             usage(); return 2
