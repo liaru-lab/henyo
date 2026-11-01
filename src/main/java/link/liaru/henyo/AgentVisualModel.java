@@ -8,6 +8,18 @@ package link.liaru.henyo;
  * resetting the glow pulse phase.</p>
  */
 final class AgentVisualModel {
+    private final ObservationEffectModel observationEffect = new ObservationEffectModel();
+
+    ObservationEffectModel.Mode observationMode() { return observationEffect.mode(); }
+    void setObservationMode(ObservationEffectModel.Mode mode) {
+        if (observationEffect.setMode(mode)) clearScan();
+    }
+    boolean beginObservation(String id, long nowMs) {
+        if (observationMode() == ObservationEffectModel.Mode.SCAN_LINE) return beginScan(id, nowMs);
+        return observationEffect.beginFrame(id, nowMs);
+    }
+    boolean observationActive(long nowMs) { return scanActive(nowMs) || observationEffect.frameActive(nowMs); }
+    float observationFrameAlpha(long nowMs) { return observationEffect.frameAlpha(nowMs); }
     static final long ACTIVE_LEASE_MS = 20_000L;
     static final long ACTIVATION_MS = 800L;
     static final long BACKDROP_ACTIVATION_MS = 120L;
@@ -192,6 +204,7 @@ final class AgentVisualModel {
 
     void clearScan() {
         scanStartedAtMs = Long.MIN_VALUE;
+        observationEffect.clear();
     }
 
     /**

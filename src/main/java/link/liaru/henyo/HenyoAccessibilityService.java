@@ -281,6 +281,19 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 : service.controlOwnership.stopped();
     }
 
+    static ObservationEffectModel.Mode observationMode(Context context) {
+        return ObservationEffectModel.Mode.fromValue(context.getSharedPreferences("presentation", MODE_PRIVATE)
+                .getString("observation_effect", ObservationEffectModel.Mode.FRAME_GLOW.value));
+    }
+
+    static void setObservationMode(Context context, ObservationEffectModel.Mode mode) {
+        context.getSharedPreferences("presentation", MODE_PRIVATE).edit()
+                .putString("observation_effect", mode.value).apply();
+        HenyoAccessibilityService service = instance;
+        if (service != null && service.connectionStatusOverlay != null)
+            service.connectionStatusOverlay.setObservationMode(mode);
+    }
+
     static String controlState(Context context) {
         HenyoAccessibilityService service = instance;
         return service == null || service.controlOwnership == null
@@ -1611,7 +1624,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             }
         }
         Response tree = routeV1("GET", "/v1/ui/tree", params, "{}");
-        Response current = tree.status.startsWith("200 ") ? appCurrent() : null;
+        Response current = tree.status.startsWith("200 ") ? appCurrent(params) : null;
         long version;
         long captureEndEventSeq;
         long captureEndElapsedRealtimeMs = SystemClock.elapsedRealtime();
@@ -2793,7 +2806,13 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private Response appCurrent() {
-        TargetSnapshot target = resolveTarget();
+        return appCurrent(java.util.Collections.emptyMap());
+    }
+
+    private Response appCurrent(Map<String, String> params) {
+        OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
+        if (!constraint.valid) return targetConstraintError(constraint);
+        TargetSnapshot target = resolveTarget(constraint, true);
         if (target == null) return json(503, "{\"ok\":false,\"error\":\"no_root\"}");
         AccessibilityNodeInfo root = target.root;
         try {

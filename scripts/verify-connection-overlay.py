@@ -90,7 +90,7 @@ require(OVERLAY, "WindowManager.LayoutParams.MATCH_PARENT,\n                Wind
 activity_draw = OVERLAY.split("protected void onDraw(Canvas canvas)", 2)[2].split(
     "private void drawTargetWindowGlow", 1
 )[0]
-scan_index = activity_draw.index("drawObservationScan")
+scan_index = activity_draw.index("drawObservationEffect")
 glove_index = activity_draw.index("drawGlove")
 background_index = activity_draw.index("drawActivityBackground")
 caption_index = activity_draw.index("drawCaption")

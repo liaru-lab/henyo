@@ -11,12 +11,6 @@ final class TargetGlowModel {
 
     private TargetGlowModel() {}
 
-    static float depthPx(int widthPx, int heightPx, float density) {
-        float safeDensity = Math.max(0.5f, density);
-        float shortSideDp = Math.min(widthPx, heightPx) / safeDensity;
-        return Math.max(4f, Math.min(11f, shortSideDp * 0.024f)) * safeDensity;
-    }
-
     static float breath(long nowMs) {
         float t = Math.floorMod(nowMs, 4_800L) / 4_800f;
         if (t < 0.31f) return smooth(t / 0.31f);
@@ -28,12 +22,6 @@ final class TargetGlowModel {
     static float intensity(float activityEnvelope, float breath) {
         float activity = 0.82f + 0.18f * clamp(activityEnvelope);
         return activity * (0.82f + 0.18f * clamp(breath));
-    }
-
-    static float innerGlowAlpha(float distancePx, float depthPx) {
-        if (depthPx <= 0f || distancePx >= depthPx) return 0f;
-        float x = clamp(distancePx / depthPx);
-        return 1f - x * x * (3f - 2f * x);
     }
 
     static float scanFadeAlpha(float normalizedPosition) {

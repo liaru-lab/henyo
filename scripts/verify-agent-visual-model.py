@@ -234,7 +234,8 @@ with tempfile.TemporaryDirectory(prefix="henyo-agent-visual-") as raw_dir:
     test_file = package_dir / "AgentVisualModelTest.java"
     test_file.write_text(TEST_SOURCE)
     subprocess.run(
-        ["javac", "-encoding", "UTF-8", "-d", str(directory), str(MODEL), str(test_file)],
+        ["javac", "-encoding", "UTF-8", "-d", str(directory), str(MODEL),
+         str(MODEL.parent / "ObservationEffectModel.java"), str(test_file)],
         check=True,
     )
     subprocess.run(

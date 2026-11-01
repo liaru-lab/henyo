@@ -15,6 +15,7 @@ import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Rect;
 import android.graphics.Region;
+import android.graphics.RegionIterator;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Build;
@@ -93,6 +94,7 @@ final class ConnectionStatusOverlay {
         this.service = service;
         this.performanceMetrics = performanceMetrics;
         this.windowManager = (WindowManager) service.getSystemService(AccessibilityService.WINDOW_SERVICE);
+        visualModel.setObservationMode(HenyoAccessibilityService.observationMode(service));
         float density = service.getResources().getDisplayMetrics().density;
         this.edgeDepthPx = Math.max(3, Math.round(48f * density));
         nextMainHeartbeatAtMs = SystemClock.uptimeMillis() + MAIN_HEARTBEAT_MS;
@@ -101,6 +103,15 @@ final class ConnectionStatusOverlay {
 
     void setConnected(boolean value) {
         mainHandler.post(() -> setConnectedOnMain(value));
+    }
+
+    void setObservationMode(ObservationEffectModel.Mode mode) {
+        Runnable update = () -> {
+            if (destroyed) return;
+            visualModel.setObservationMode(mode);
+            if (activityView != null) activityView.invalidate();
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) update.run(); else mainHandler.post(update);
     }
 
     void setControlActions(Runnable stop, Runnable resume) {
@@ -314,7 +325,8 @@ final class ConnectionStatusOverlay {
     }
 
     void showObservation(String logicalId) {
-        postVisual(() -> visualModel.beginScan(logicalId, SystemClock.uptimeMillis()));
+        if (visualModel.observationMode() == ObservationEffectModel.Mode.OFF) return;
+        postVisual(() -> visualModel.beginObservation(logicalId, SystemClock.uptimeMillis()));
     }
 
     void setTargetWindow(int windowId, int displayId, Rect bounds, Region presentationRegion, Rect focusedInput,
@@ -673,6 +685,7 @@ final class ConnectionStatusOverlay {
             view.setEdge(EDGE_TOP);
             if (active || visualModel.isActivityVisible(SystemClock.uptimeMillis())) ensureActiveEdgeViews();
             if (active || fadingOut || visualModel.isActivityVisible(SystemClock.uptimeMillis())
+                    || visualModel.observationActive(SystemClock.uptimeMillis())
                     || !activityModel.isEmpty(SystemClock.uptimeMillis())
                     || !progressModel.isEmpty()
                     || !completionModel.isEmpty(SystemClock.uptimeMillis())) ensureActivityView();
@@ -707,6 +720,7 @@ final class ConnectionStatusOverlay {
         if (activityView != null || windowManager == null || captureSuppressionDepth > 0
                 || (!active && !fadingOut
                 && !visualModel.isActivityVisible(SystemClock.uptimeMillis())
+                && !visualModel.observationActive(SystemClock.uptimeMillis())
                 && activityModel.isEmpty(SystemClock.uptimeMillis())
                 && progressModel.isEmpty()
                 && completionModel.isEmpty(SystemClock.uptimeMillis()))) return;
@@ -750,6 +764,7 @@ final class ConnectionStatusOverlay {
     private void removeActivityViewIfEmpty() {
         if (activityView == null || active || fadingOut
                 || visualModel.isActivityVisible(SystemClock.uptimeMillis())
+                || visualModel.observationActive(SystemClock.uptimeMillis())
                 || !activityModel.isEmpty(SystemClock.uptimeMillis())
                 || !progressModel.isEmpty()
                 || !completionModel.isEmpty(SystemClock.uptimeMillis())) return;
@@ -801,7 +816,6 @@ final class ConnectionStatusOverlay {
         final Rect focusedInputBounds = new Rect();
         final Region presentationRegion = new Region();
         final Path outline = new Path();
-        final Path presentationClip = new Path();
         int windowId = -1;
         int displayId = Display.DEFAULT_DISPLAY;
         int displayWidth;
@@ -830,15 +844,20 @@ final class ConnectionStatusOverlay {
             valid = windowId >= 0 && !bounds.isEmpty() && !contourBounds.isEmpty()
                     && !presentationRegion.isEmpty();
             outline.reset();
-            presentationClip.reset();
             if (valid) {
-                // A full-span title/status/navigation strip can remove one target edge.
-                // Anchor the contour to the remaining presentation bounds so that edge
-                // moves beside the visible client area instead of disappearing under chrome.
-                float radius = Math.min(14f * density,
-                        Math.min(contourBounds.width(), contourBounds.height()) * 0.08f);
-                outline.addRoundRect(new RectF(contourBounds), radius, radius, Path.Direction.CW);
-                presentationRegion.getBoundaryPath(presentationClip);
+                if (!contourBounds.intersect(0, 0, displayWidth, displayHeight)) {
+                    valid = false;
+                } else {
+                    long visibleArea = 0L;
+                    RegionIterator iterator = new RegionIterator(presentationRegion);
+                    Rect piece = new Rect();
+                    while (iterator.next(piece)) {
+                        if (piece.intersect(contourBounds)) visibleArea += (long) piece.width() * piece.height();
+                    }
+                    TargetFrameGeometry frame = new TargetFrameGeometry(contourBounds.left, contourBounds.top,
+                            contourBounds.right, contourBounds.bottom, visibleArea, density);
+                    buildFramePath(outline, frame);
+                }
             }
             generation++;
         }
@@ -852,8 +871,26 @@ final class ConnectionStatusOverlay {
             focusedInputBounds.setEmpty();
             presentationRegion.setEmpty();
             outline.reset();
-            presentationClip.reset();
             generation++;
+        }
+
+        private static void buildFramePath(Path path, TargetFrameGeometry frame) {
+            if (!frame.valid()) return;
+            if (!frame.cornersOnly) {
+                path.addRoundRect(new RectF(frame.left, frame.top, frame.right, frame.bottom),
+                        frame.radius, frame.radius, Path.Direction.CW);
+                return;
+            }
+            float l = frame.left, t = frame.top, r = frame.right, b = frame.bottom;
+            float radius = frame.radius, length = frame.cornerLength;
+            path.moveTo(l, t + length); path.lineTo(l, t + radius);
+            path.quadTo(l, t, l + radius, t); path.lineTo(l + length, t);
+            path.moveTo(r - length, t); path.lineTo(r - radius, t);
+            path.quadTo(r, t, r, t + radius); path.lineTo(r, t + length);
+            path.moveTo(r, b - length); path.lineTo(r, b - radius);
+            path.quadTo(r, b, r - radius, b); path.lineTo(r - length, b);
+            path.moveTo(l + length, b); path.lineTo(l + radius, b);
+            path.quadTo(l, b, l, b - radius); path.lineTo(l, b - length);
         }
     }
 
@@ -1123,7 +1160,7 @@ final class ConnectionStatusOverlay {
         private final Paint gloveGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint targetOutlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint targetGlowBitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Paint observationFramePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final TextPaint progressPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         private final Paint progressIconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path progressCheckPath = new Path();
@@ -1154,8 +1191,6 @@ final class ConnectionStatusOverlay {
         private float animatedPanelTop = Float.NaN;
         private long panelDrawAtMs;
         private long targetShaderGeneration = -1L;
-        private long targetGlowBitmapGeneration = -1L;
-        private Bitmap targetGlowBitmap;
         private boolean running = true;
         private boolean emptyCallbackPosted;
 
@@ -1214,6 +1249,9 @@ final class ConnectionStatusOverlay {
             targetOutlinePaint.setStyle(Paint.Style.STROKE);
             targetOutlinePaint.setStrokeCap(Paint.Cap.ROUND);
             targetOutlinePaint.setStrokeJoin(Paint.Join.ROUND);
+            observationFramePaint.setStyle(Paint.Style.STROKE);
+            observationFramePaint.setStrokeCap(Paint.Cap.ROUND);
+            observationFramePaint.setStrokeJoin(Paint.Join.ROUND);
             setWillNotDraw(false);
         }
 
@@ -1243,7 +1281,6 @@ final class ConnectionStatusOverlay {
 
         @Override
         protected void onDetachedFromWindow() {
-            recycleTargetGlowBitmap();
             recycleScanGlowBitmap();
             super.onDetachedFromWindow();
         }
@@ -1297,7 +1334,7 @@ final class ConnectionStatusOverlay {
                     captionHeights, messages.size(), progressRows.size(), activePlanRow, progressRowHeightPx,
                     fullCompletionLayout == null ? 0 : fullCompletionLayout.getHeight());
             boolean hasPresentation = !messages.isEmpty() || !progressRows.isEmpty() || completion != null;
-            drawObservationScan(canvas, width, height, now, hasPresentation);
+            drawObservationEffect(canvas, width, height, now, hasPresentation);
             AgentVisualModel.CursorFrame cursorFrame = visualModel.cursorFrame(now);
             drawGlove(canvas, now, cursorFrame);
             float backgroundAlpha = visualModel.backdropEnvelope(now);
@@ -1307,7 +1344,7 @@ final class ConnectionStatusOverlay {
                 drawActivityBackground(canvas, backgroundAlpha, panelWidth, now);
             }
             if (!hasPresentation) {
-                if (!visualModel.isActivityVisible(now) && visualModel.scanPosition(now) < 0f
+                if (!visualModel.isActivityVisible(now) && !visualModel.observationActive(now)
                         && cursorFrame == null && !emptyCallbackPosted) {
                     emptyCallbackPosted = true;
                     post(emptyCallback);
@@ -1355,95 +1392,43 @@ final class ConnectionStatusOverlay {
             if (!targetVisualState.valid || !visualModel.isActivityVisible(now)) return;
             Rect bounds = targetVisualState.contourBounds;
             if (bounds.isEmpty()) return;
-            float depth = TargetGlowModel.depthPx(bounds.width(), bounds.height(),
-                    targetVisualState.density);
             float breath = TargetGlowModel.breath(now);
-            depth *= 0.96f + 0.08f * breath;
-            float intensity = TargetGlowModel.intensity(
-                    visualModel.activityEnvelope(now), breath);
-
+            float intensity = TargetGlowModel.intensity(visualModel.activityEnvelope(now), breath);
             if (targetShaderGeneration != targetVisualState.generation) {
                 targetShaderGeneration = targetVisualState.generation;
-                Shader targetShader = new LinearGradient(
+                targetOutlinePaint.setShader(new LinearGradient(
                         bounds.left, bounds.top, bounds.right, bounds.bottom,
-                        new int[]{
-                                Color.rgb(67, 210, 196),
-                                Color.rgb(92, 154, 222),
-                                Color.rgb(157, 126, 204),
-                                Color.rgb(67, 210, 196)
-                        },
-                        new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP);
-                targetOutlinePaint.setShader(targetShader);
+                        new int[]{Color.rgb(67, 210, 196), Color.rgb(92, 154, 222),
+                                Color.rgb(157, 126, 204), Color.rgb(67, 210, 196)},
+                        new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP));
             }
-
-            ensureTargetGlowBitmap(depth);
-            int saved = canvas.save();
-            canvas.clipPath(targetVisualState.presentationClip);
-            if (targetGlowBitmap != null) {
-                targetGlowBitmapPaint.setAlpha(Math.round(245f * intensity));
-                canvas.drawBitmap(targetGlowBitmap, bounds.left, bounds.top, targetGlowBitmapPaint);
-            }
-            targetOutlinePaint.setStrokeWidth(8f * targetVisualState.density);
-            targetOutlinePaint.setAlpha(245);
+            targetOutlinePaint.setStrokeWidth(10f * targetVisualState.density);
+            targetOutlinePaint.setAlpha(Math.round(10f * intensity));
             canvas.drawPath(targetVisualState.outline, targetOutlinePaint);
-            canvas.restoreToCount(saved);
+            targetOutlinePaint.setStrokeWidth(4f * targetVisualState.density);
+            targetOutlinePaint.setAlpha(Math.round(24f * intensity));
+            canvas.drawPath(targetVisualState.outline, targetOutlinePaint);
+            targetOutlinePaint.setStrokeWidth(1f * targetVisualState.density);
+            targetOutlinePaint.setAlpha(Math.round(64f * intensity));
+            canvas.drawPath(targetVisualState.outline, targetOutlinePaint);
         }
 
-        private void ensureTargetGlowBitmap(float depth) {
-            Rect bounds = targetVisualState.contourBounds;
-            if (targetGlowBitmapGeneration == targetVisualState.generation
-                    && targetGlowBitmap != null
-                    && targetGlowBitmap.getWidth() == bounds.width()
-                    && targetGlowBitmap.getHeight() == bounds.height()) return;
-            recycleTargetGlowBitmap();
-            if (bounds.isEmpty()) return;
-            int width = bounds.width();
-            int height = bounds.height();
-            int[] pixels;
-            try {
-                targetGlowBitmap = Bitmap.createBitmap(
-                        width, height, Bitmap.Config.ARGB_8888);
-                pixels = new int[Math.multiplyExact(width, height)];
-            } catch (RuntimeException | OutOfMemoryError ignored) {
-                recycleTargetGlowBitmap();
-                targetGlowBitmap = null;
-                return;
+        private void drawObservationEffect(Canvas canvas, int width, int height, long now, boolean hasCaptions) {
+            float alpha = visualModel.observationFrameAlpha(now);
+            if (alpha > 0f && targetVisualState.valid) {
+                observationFramePaint.setColor(Color.rgb(186, 234, 242));
+                observationFramePaint.setStrokeWidth(12f * targetVisualState.density);
+                observationFramePaint.setAlpha(Math.round(24f * alpha));
+                canvas.drawPath(targetVisualState.outline, observationFramePaint);
+                observationFramePaint.setStrokeWidth(6f * targetVisualState.density);
+                observationFramePaint.setAlpha(Math.round(60f * alpha));
+                canvas.drawPath(targetVisualState.outline, observationFramePaint);
+                observationFramePaint.setColor(Color.rgb(76, 205, 224));
+                observationFramePaint.setStrokeWidth(1.6f * targetVisualState.density);
+                observationFramePaint.setAlpha(Math.round(220f * alpha));
+                canvas.drawPath(targetVisualState.outline, observationFramePaint);
             }
-            float halfWidth = width * 0.5f;
-            float halfHeight = height * 0.5f;
-            float radius = Math.min(14f * targetVisualState.density,
-                    Math.min(width, height) * 0.08f);
-            float flatHalfWidth = Math.max(0f, halfWidth - radius);
-            float flatHalfHeight = Math.max(0f, halfHeight - radius);
-            float glowDepth = Math.max(12f * targetVisualState.density, depth * 3.2f);
-            float projectionDenominator = Math.max(1f, width * (float) width + height * (float) height);
-            for (int y = 0; y < height; y++) {
-                float localY = y + 0.5f;
-                float qy = Math.abs(localY - halfHeight) - flatHalfHeight;
-                for (int x = 0; x < width; x++) {
-                    float localX = x + 0.5f;
-                    float qx = Math.abs(localX - halfWidth) - flatHalfWidth;
-                    float outside = (float) Math.hypot(Math.max(qx, 0f), Math.max(qy, 0f));
-                    float signedDistance = outside + Math.min(Math.max(qx, qy), 0f) - radius;
-                    if (signedDistance > 0f) continue;
-                    float glow = TargetGlowModel.innerGlowAlpha(-signedDistance, glowDepth);
-                    if (glow <= 0f) continue;
-                    float colorPosition = (localX * width + localY * height) / projectionDenominator;
-                    int color = TargetGlowModel.gradientColor(colorPosition);
-                    int alpha = Math.round(205f * glow);
-                    pixels[y * width + x] = Color.argb(alpha,
-                            Color.red(color), Color.green(color), Color.blue(color));
-                }
-            }
-            targetGlowBitmap.setPixels(pixels, 0, width, 0, 0, width, height);
-            targetGlowBitmapGeneration = targetVisualState.generation;
-        }
-
-        private void recycleTargetGlowBitmap() {
-            targetGlowBitmapGeneration = -1L;
-            if (targetGlowBitmap == null) return;
-            targetGlowBitmap.recycle();
-            targetGlowBitmap = null;
+            drawObservationScan(canvas, width, height, now, hasCaptions);
         }
 
         private void drawTaskProgress(Canvas canvas, List<TaskProgressModel.Row> rows,
@@ -1523,7 +1508,7 @@ final class ConnectionStatusOverlay {
                                        AgentVisualModel.CursorFrame cursorFrame,
                                        boolean hasMessages, int presentationTop) {
             if (!running) return;
-            boolean fullScreenMotion = visualModel.scanPosition(now) >= 0f
+            boolean fullScreenMotion = visualModel.observationActive(now)
                     || visualCoordinates.isAnimating(now)
                     || cursorFrame != null && (cursorFrame.phase != AgentVisualModel.CURSOR_PHASE_IDLE
                     || cursorFrame.phaseProgress < 1f);
@@ -1531,7 +1516,9 @@ final class ConnectionStatusOverlay {
                 postInvalidateOnAnimation();
                 return;
             }
-            if (hasMessages || visualModel.isBackdropAnimating(now)) {
+            if (visualModel.isActivityVisible(now)) {
+                postInvalidateDelayed(CAPTION_FRAME_MS);
+            } else if (hasMessages || visualModel.isBackdropAnimating(now)) {
                 int dirtyTop = Math.max(0, presentationTop - Math.round(8f * density));
                 postInvalidateDelayed(CAPTION_FRAME_MS, 0, dirtyTop, width, height);
             }

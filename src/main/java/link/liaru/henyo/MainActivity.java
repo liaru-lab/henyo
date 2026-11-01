@@ -102,6 +102,20 @@ public class MainActivity extends Activity {
         styleSecondaryButton(chooseExcludedApps);
         root.addView(chooseExcludedApps);
 
+        root.addView(sectionTitle("Observation effect"));
+        TextView observationHelp = bodyText();
+        observationHelp.setText("Choose a cue for screen observations. The connection indicator remains visible.");
+        root.addView(observationHelp);
+        RadioGroup observationModes = new RadioGroup(this);
+        ObservationEffectModel.Mode[] modes = ObservationEffectModel.Mode.values();
+        for (int i = 0; i < modes.length; i++) observationModes.addView(radio(3001 + i, modes[i].label));
+        observationModes.check(3001 + HenyoAccessibilityService.observationMode(this).ordinal());
+        observationModes.setOnCheckedChangeListener((group, id) -> {
+            int index = id - 3001;
+            if (index >= 0 && index < modes.length) HenyoAccessibilityService.setObservationMode(this, modes[index]);
+        });
+        root.addView(observationModes);
+
         root.addView(sectionTitle("Remote Access"));
         remoteEnabled = new Switch(this);
         remoteEnabled.setText("Enable remote access");
