@@ -286,6 +286,7 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyObservationEffects", "verifyAgentVisualModel"
     dependsOn "verifyConnectionOverlay"
     dependsOn "verifyActivityPanelLayout"
     dependsOn "verifyTaskPresentation"
@@ -322,6 +323,14 @@ tasks.register("verifyActivityPanelLayout", Exec) {
 
 tasks.register("verifyConnectionOverlay", Exec) {
     commandLine "python", "scripts/verify-connection-overlay.py"
+}
+
+tasks.register("verifyObservationEffects", Exec) {
+    commandLine "python", "scripts/verify-observation-effects.py"
+}
+
+tasks.register("verifyAgentVisualModel", Exec) {
+    commandLine "python", "scripts/verify-agent-visual-model.py"
 }
 
 tasks.register("verifyScreenshotCallback", Exec) {

@@ -219,16 +219,23 @@ docs/ws-control-protocol.md
 ```
 
 While at least one authenticated WebSocket control session is connected, Henyo
-draws a restrained dark-navy and cyan indicator using the app icon's palette.
-A control call or batch expands it into a translucent inward glow around the
-resolved target window on that window's display. The contour follows the safe
-presentation bounds, clips around occluding overlays, and moves beside task
-chrome when an edge cannot be drawn over directly. Recent activity holds for
+draws a restrained connection indicator. Activity adds a faint, slowly breathing
+frame around the resolved target's visible client extent on its display. The
+frame stays inset and continuous; substantial occlusion uses intentional corner
+brackets instead of arbitrary cutouts. This presentation does not change input
+hit testing. Recent activity holds for
 20 seconds and then fades over 1.8 seconds, bridging slower agent pauses
 instead of repeatedly collapsing. The first activation and any fade reversal
 ease into one uptime-based pulse; a new call extends the lease without resetting
 the pulse phase. Presentation does not add an empty text panel to calls without
 comments or a task plan.
+
+The English `Observation effect` setting offers `Frame glow` (default),
+`Scan line`, and `Off`. Frame glow gives one soft 700ms illumination, distinct
+from the slow breathing frame. Scan line retains the moving 1400ms cue. Off
+suppresses observation effects while retaining connection/control feedback.
+The selection persists, can change during activity, and adds no animation wait
+to capture or control. Normal captures exclude Henyo overlays.
 
 Calls and batches may include a short `display.summary`. Up to three natural-
 language summaries appear near the lower-left edge with a brief type-in effect;
