@@ -42,9 +42,17 @@ public final class AgentActivityModelTest {
         check("⠋".equals(AgentActivityModel.spinnerFrame(0L)), "spinner must start at the first frame");
         check("⠙".equals(AgentActivityModel.spinnerFrame(AgentActivityModel.SPINNER_FRAME_MS)),
                 "spinner must advance deterministically");
-        check(AgentActivityModel.spinnerFrame(AgentActivityModel.SPINNER_FRAME_MS * 10L).equals("⠋"),
+        String[] frames = {"⠋", "⠙", "⠸", "⠴", "⠦", "⠇"};
+        check(AgentActivityModel.SPINNER_FRAME_MS == 150L, "each frame must last 150ms");
+        for (int i = 0; i < frames.length; i++) {
+            long start = i * 150L;
+            check(frames[i].equals(AgentActivityModel.spinnerFrame(start)), "rotation order");
+            check(frames[i].equals(AgentActivityModel.spinnerFrame(start + 149L)), "uniform hold");
+            check(Integer.bitCount(frames[i].codePointAt(0) - 0x2800) == 3, "three dots per frame");
+        }
+        check(AgentActivityModel.spinnerFrame(900L).equals("⠋"),
                 "spinner must wrap through all frames");
-        check(AgentActivityModel.displayText(typed, 1_001L, true).startsWith("⠙ " + emoji),
+        check(AgentActivityModel.displayText(typed, 1_001L, true).startsWith("⠋ " + emoji),
                 "newest row must prefix the spinner without splitting typed text");
         check(AgentActivityModel.displayText(typed, 1_001L, false).equals(prefix),
                 "older rows must have no spinner or caret");
