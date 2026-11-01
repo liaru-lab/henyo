@@ -2,6 +2,10 @@
 
 This is a standalone experiment, outside the APK and production control path. It evaluates whether CPU or OpenCL GPU decision inference can improve a Henyo control loop while keeping observations local. The runner uses only generated English/Japanese fixtures and never sends UI events.
 
+See [Android kernels and reuse](KERNELS.md) for the follow-up patch, fixed-input
+comparison harness, KV-cache constraints and measured alternatives to the current
+OpenCL execution path.
+
 ## Reproducible configuration
 
 - Runtime: [llama.cpp b11960](https://github.com/ggml-org/llama.cpp/tree/8642541b255bfb5dc39cd351a178be09013a55d6), commit `8642541b255bfb5dc39cd351a178be09013a55d6`.
