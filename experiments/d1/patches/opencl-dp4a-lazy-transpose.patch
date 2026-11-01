@@ -1,0 +1,119 @@
+--- a/ggml/src/ggml-opencl/ggml-opencl.cpp
++++ b/ggml/src/ggml-opencl/ggml-opencl.cpp
+@@ -23574,54 +23574,6 @@
+             return;
+         }
+
+-        // image for activations
+-        img_fmt = {CL_RGBA, CL_FLOAT};
+-        memset(&img_desc, 0, sizeof(img_desc));
+-        img_desc.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+-        img_desc.image_width = K * N / 4;
+-        img_desc.buffer = b_sub_buf;
+-        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
+-
+-        // pad N to multiple of 8
+-        int extra_elements = N % 8;
+-        int padding = 0;
+-        if (extra_elements > 0){
+-            padding = 8 - extra_elements;
+-        }
+-
+-        // subbuffer for transposed activations
+-        region.origin = 0;
+-        region.size = K * (N + padding) * sizeof(float)/2;
+-        backend_ctx->prealloc_act_trans.allocate(context, region.size);
+-        CL_CHECK((b_sub_buf_trans = clCreateSubBuffer(backend_ctx->prealloc_act_trans.buffer, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
+-
+-        // image for transposed activations
+-        img_fmt = {CL_RGBA, CL_HALF_FLOAT};
+-        memset(&img_desc, 0, sizeof(img_desc));
+-        img_desc.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
+-        img_desc.image_width = K * (N + padding) / 4;
+-        img_desc.buffer = b_sub_buf_trans;
+-        CL_CHECK((b_img_trans = clCreateImage(context, 0, &img_fmt, &img_desc, NULL, &err), err));
+-
+-        // transpose activations
+-        int height_B = N/4;
+-        if (height_B == 0) {
+-            height_B = 1;
+-        }
+-        int width_B = K/4;
+-        int padded_height_B = (N + padding)/4;
+-
+-        kernel = backend_ctx->kernel_transpose_32_16;
+-        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+-        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+-        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
+-        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
+-        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
+-
+-        size_t local_work_size_t[2] = { 1, 16 };
+-        size_t global_work_size_t[2] = { (size_t)width_B, (size_t)padded_height_B };
+-        backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+-
+         // dp4a (int8) dense prefill GEMM and weight via texture
+         static const char * q4k_dense_dp4a_env = getenv("GGML_OPENCL_Q4K_DENSE_DP4A");
+         static const char * q4k_dense_wimg_env = getenv("GGML_OPENCL_Q4K_DENSE_DP4A_WIMG");
+@@ -23719,11 +23671,58 @@
+                 CL_CHECK(clReleaseMemObject(q4k_q_img));
+             }
+             CL_CHECK(clReleaseMemObject(b_sub_buf));
+-            CL_CHECK(clReleaseMemObject(b_sub_buf_trans));
+-            CL_CHECK(clReleaseMemObject(b_img));
+-            CL_CHECK(clReleaseMemObject(b_img_trans));
+             return;
+         }
++
++        // Only the floating-point GEMM below consumes transposed activations.
++        // The DP4A branch reads b_sub_buf directly and returns before this work.
++        // image for activations
++        img_fmt = {CL_RGBA, CL_FLOAT};
++        memset(&img_desc, 0, sizeof(img_desc));
++        img_desc.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
++        img_desc.image_width = K * N / 4;
++        img_desc.buffer = b_sub_buf;
++        CL_CHECK((b_img = clCreateImage(context, CL_MEM_READ_ONLY, &img_fmt, &img_desc, NULL, &err), err));
++
++        // pad N to multiple of 8
++        int extra_elements = N % 8;
++        int padding = 0;
++        if (extra_elements > 0){
++            padding = 8 - extra_elements;
++        }
++
++        // subbuffer for transposed activations
++        region.origin = 0;
++        region.size = K * (N + padding) * sizeof(float)/2;
++        backend_ctx->prealloc_act_trans.allocate(context, region.size);
++        CL_CHECK((b_sub_buf_trans = clCreateSubBuffer(backend_ctx->prealloc_act_trans.buffer, 0, CL_BUFFER_CREATE_TYPE_REGION, &region, &err), err));
++
++        // image for transposed activations
++        img_fmt = {CL_RGBA, CL_HALF_FLOAT};
++        memset(&img_desc, 0, sizeof(img_desc));
++        img_desc.image_type = CL_MEM_OBJECT_IMAGE1D_BUFFER;
++        img_desc.image_width = K * (N + padding) / 4;
++        img_desc.buffer = b_sub_buf_trans;
++        CL_CHECK((b_img_trans = clCreateImage(context, 0, &img_fmt, &img_desc, NULL, &err), err));
++
++        // transpose activations
++        int height_B = N/4;
++        if (height_B == 0) {
++            height_B = 1;
++        }
++        int width_B = K/4;
++        int padded_height_B = (N + padding)/4;
++
++        kernel = backend_ctx->kernel_transpose_32_16;
++        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
++        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
++        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
++        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
++        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
++
++        size_t local_work_size_t[2] = { 1, 16 };
++        size_t global_work_size_t[2] = { (size_t)width_B, (size_t)padded_height_B };
++        backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+
+         // gemm
+         // Small-batch (medium n_q) occupancy fix: at ne1<=8 the 2x8 grid is
