@@ -814,6 +814,10 @@ final class ConnectionStatusOverlay {
     /** Geometry is controller-owned so screenshot detach/restore preserves motion. */
     private static final class VisualCoordinates {
         private static final float SPRITE_SOURCE_SIZE = 256f;
+        static final int TRAIL_MS = 120;
+        static final int TRAIL_SAMPLES = 8;
+        private final float[] trailCurrentWrist = new float[2];
+        private final float[] trailProbeWrist = new float[2];
         private static final float[] WRIST_X = {0f, 132f, 128f, 160f};
         private static final float[] WRIST_Y = {0f, 214f, 224f, 196f};
         private static final float[] HOTSPOT_X = {0f, 109f, 128f, 27f};
@@ -905,6 +909,30 @@ final class ConnectionStatusOverlay {
                     / (float) Math.max(1, travelDurationMs));
             result[0] = mix(travelFromX, mix(travelToX, actionToX, progress), travel);
             result[1] = mix(travelFromY, mix(travelToY, actionToY, progress), travel);
+        }
+
+        /** Returns a fading sample of actual movement, including just after a stop. */
+        float trailSampleAt(long nowMs, int ageMs, float density, float[] result) {
+            if (!initialized || ageMs <= 0 || ageMs >= TRAIL_MS) return 0f;
+            long segmentStart = nowMs < actionStartedAtMs ? travelStartedAtMs : actionStartedAtMs;
+            long sampleTime = nowMs - ageMs;
+            if (sampleTime <= segmentStart || !isAnimating(sampleTime)) return 0f;
+            long probeTime = Math.max(segmentStart, sampleTime - 6L);
+            wristAt(sampleTime, result);
+            wristAt(probeTime, trailProbeWrist);
+            float speed = (float) Math.hypot(result[0] - trailProbeWrist[0],
+                    result[1] - trailProbeWrist[1]) / ((sampleTime - probeTime) * density);
+            float strength = Math.min(1f, Math.max(0f, (speed - 0.08f) / 1.2f));
+            if (strength <= 0f) return 0f;
+            wristAt(nowMs, trailCurrentWrist);
+            float dx = result[0] - trailCurrentWrist[0];
+            float dy = result[1] - trailCurrentWrist[1];
+            float distance = (float) Math.hypot(dx, dy);
+            if (distance < 0.5f * density) return 0f;
+            float scale = Math.min(1f, 72f * density / distance);
+            result[0] = trailCurrentWrist[0] + dx * scale;
+            result[1] = trailCurrentWrist[1] + dy * scale;
+            return 0.22f * strength * (1f - ageMs / (float) TRAIL_MS);
         }
 
         boolean isAnimating(long nowMs) {
@@ -1426,6 +1454,7 @@ final class ConnectionStatusOverlay {
             if (!running) return;
             boolean fullScreenMotion = visualModel.observationActive(now)
                     || visualCoordinates.isAnimating(now)
+                    || visualCoordinates.isAnimating(now - VisualCoordinates.TRAIL_MS)
                     || cursorFrame != null && (cursorFrame.phase != AgentVisualModel.CURSOR_PHASE_IDLE
                     || cursorFrame.phaseProgress < 1f);
             if (fullScreenMotion) {
@@ -1536,38 +1565,19 @@ final class ConnectionStatusOverlay {
         }
 
         private void drawGloveMotionTrail(Canvas canvas, long now, int pose, int alpha) {
-            if (!visualCoordinates.isAnimating(now)) return;
-            // Sample only the current motion segment, so pose changes and new
-            // sessions never inherit an old hand image. No frame history is retained.
-            long segmentStart = now < visualCoordinates.actionStartedAtMs
-                    ? visualCoordinates.travelStartedAtMs : visualCoordinates.actionStartedAtMs;
-            long probeTime = Math.max(segmentStart, now - 6L);
-            if (probeTime >= now) return;
-            visualCoordinates.wristAt(probeTime, gloveTrailWrist);
-            float speed = (float) Math.hypot(gloveWrist[0] - gloveTrailWrist[0],
-                    gloveWrist[1] - gloveTrailWrist[1]) / ((now - probeTime) * density);
-            float strength = Math.min(1f, Math.max(0f, (speed - 0.08f) / 1.2f));
-            if (strength <= 0f) return;
-            for (int sample = 6; sample >= 1; sample--) {
-                long sampleTime = Math.max(segmentStart, now - sample * 4L);
-                visualCoordinates.wristAt(sampleTime, gloveTrailWrist);
-                float dx = gloveTrailWrist[0] - gloveWrist[0];
-                float dy = gloveTrailWrist[1] - gloveWrist[1];
-                float distance = (float) Math.hypot(dx, dy);
-                if (distance < 0.5f * density) continue;
-                float scale = Math.min(1f, 24f * density / distance);
-                int trailAlpha = Math.round(alpha * strength * 0.13f * (1f - sample / 7f));
-                drawGloveBitmap(canvas, pose, gloveWrist[0] + dx * scale,
-                        gloveWrist[1] + dy * scale, trailAlpha, false);
+            // Evaluate the preceding 120ms of the current segment without retaining
+            // frame history. Stops fade naturally; new actions cannot revive old poses.
+            int intervalMs = VisualCoordinates.TRAIL_MS / VisualCoordinates.TRAIL_SAMPLES;
+            for (int sample = VisualCoordinates.TRAIL_SAMPLES; sample >= 1; sample--) {
+                int ageMs = sample * intervalMs - intervalMs / 2;
+                float opacity = visualCoordinates.trailSampleAt(now, ageMs, density, gloveTrailWrist);
+                int trailAlpha = Math.round(alpha * opacity);
+                if (trailAlpha > 0) drawGloveBitmap(canvas, pose,
+                        gloveTrailWrist[0], gloveTrailWrist[1], trailAlpha);
             }
         }
 
         private void drawGloveBitmap(Canvas canvas, int pose, float wristX, float wristY, int alpha) {
-            drawGloveBitmap(canvas, pose, wristX, wristY, alpha, true);
-        }
-
-        private void drawGloveBitmap(Canvas canvas, int pose, float wristX, float wristY,
-                int alpha, boolean glow) {
             if (alpha <= 0) return;
             Bitmap bitmap = pose == AgentVisualModel.GLOVE_POSE_OPEN_PALM
                     ? swipeGloveBitmap
@@ -1579,12 +1589,17 @@ final class ConnectionStatusOverlay {
             float left = wristX - VisualCoordinates.WRIST_X[pose] / sourceSize * size;
             float top = wristY - VisualCoordinates.WRIST_Y[pose] / sourceSize * size;
             gloveRect.set(left, top, left + size, top + size);
-            float glowOutset = 2.25f * density;
+            float glowOutset = 7f * density;
             gloveGlowRect.set(gloveRect.left - glowOutset, gloveRect.top - glowOutset,
                     gloveRect.right + glowOutset, gloveRect.bottom + glowOutset);
-            gloveGlowPaint.setAlpha(Math.round(alpha * 0.22f));
+            gloveGlowPaint.setAlpha(Math.round(alpha * 0.20f));
+            canvas.drawBitmap(bitmap, null, gloveGlowRect, gloveGlowPaint);
+            glowOutset = 3f * density;
+            gloveGlowRect.set(gloveRect.left - glowOutset, gloveRect.top - glowOutset,
+                    gloveRect.right + glowOutset, gloveRect.bottom + glowOutset);
+            gloveGlowPaint.setAlpha(Math.round(alpha * 0.55f));
+            canvas.drawBitmap(bitmap, null, gloveGlowRect, gloveGlowPaint);
             gloveBitmapPaint.setAlpha(alpha);
-            if (glow) canvas.drawBitmap(bitmap, null, gloveGlowRect, gloveGlowPaint);
             canvas.drawBitmap(bitmap, null, gloveRect, gloveBitmapPaint);
         }
 
