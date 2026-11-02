@@ -8,6 +8,8 @@ remove those three dependencies and strip debug information on fresh copies only
 import argparse
 import hashlib
 import json
+import re
+import struct
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,6 +27,9 @@ def main():
     parser.add_argument('--source', type=Path, required=True,
                         help='pinned patched project source, used to build the backend registry')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--v81-dsp', type=Path,
+                        help='optional matched v81 DSP library; enables the conservative v81 APK profile')
+    parser.add_argument('--v81-sha256', help='required expected SHA-256 when adding the v81 DSP library')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     bundle, output = args.bundle.resolve(), args.output.resolve()
@@ -32,6 +37,16 @@ def main():
         raise ValueError('runtime packaging output must remain under artifacts')
     if output.exists():
         raise FileExistsError('use a new output directory')
+    if bool(args.v81_dsp) != bool(args.v81_sha256):
+        raise ValueError('v81 DSP and its expected SHA-256 must be supplied together')
+    if args.v81_dsp:
+        if not re.fullmatch('[0-9a-f]{64}', args.v81_sha256) or sha(args.v81_dsp) != args.v81_sha256:
+            raise ValueError('v81 DSP digest mismatch')
+        header = args.v81_dsp.read_bytes()[:52]
+        if (len(header) < 52 or header[:6] != b'\x7fELF\x01\x01'
+                or struct.unpack_from('<H', header, 18)[0] != 164
+                or struct.unpack_from('<I', header, 36)[0] & 0xff != 0x81):
+            raise ValueError('expected a Hexagon v81 DSP ELF')
     manifest = json.loads((bundle / 'manifest.json').read_text())
     if (manifest.get('schema') != 1 or manifest.get('kernel_contract') != 'henyo.d1.htp-v79/1'
             or manifest.get('runtime_revision') != '8642541b255bfb5dc39cd351a178be09013a55d6'):
@@ -56,6 +71,11 @@ def main():
     for name, relative in sources.items():
         path = native / name
         shutil.copy2(bundle / relative, path)
+    if args.v81_dsp:
+        destination = native / 'libggml-htp-v81.so'
+        shutil.copy2(args.v81_dsp, destination)
+        if sha(destination) != args.v81_sha256:
+            raise ValueError('v81 DSP changed during packaging')
     registry_sources = [source_root / 'ggml/src' / name
                         for name in ['ggml-backend-dl.cpp', 'ggml-backend-reg.cpp']]
     for path in registry_sources:
@@ -89,7 +109,7 @@ def main():
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
     for path in native.iterdir():
         name = path.name
-        if name != 'libggml-htp-v79.so':
+        if not re.fullmatch(r'libggml-htp-v(?:79|81)\.so', name):
             for dependency in ['libggml-opencl.so', 'libggml-rpc.so', 'libggml-hexagon.so']:
                 subprocess.run(['patchelf', '--remove-needed', dependency, str(path)], check=True)
             subprocess.run(['patchelf', '--set-rpath', '$ORIGIN', str(path)], check=True)
@@ -105,7 +125,7 @@ def main():
                         '-nostdlib', '-Wl,--no-undefined', str(marker), '-o', str(destination)], check=True)
     assets = output / 'assets'
     assets.mkdir()
-    data = {'schema': 1, 'contract': manifest['kernel_contract'],
+    data = {'schema': 1, 'contract': 'henyo.d1.htp-v79-v81/1' if args.v81_dsp else manifest['kernel_contract'],
             'revision': manifest['runtime_revision'],
             'sourcePatchSha256': manifest['source_patch_sha256'],
             'launcherSourceSha256': sha(launcher),

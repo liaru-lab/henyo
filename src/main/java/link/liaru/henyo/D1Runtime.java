@@ -112,18 +112,8 @@ final class D1Runtime {
             try {
                 check(ticket); verifyModel(model, ticket);
                 File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir);
-                JSONObject manifest;
-                try(InputStream stream=context.getAssets().open("d1-runtime.json")) {
-                    manifest = new JSONObject(new String(readLimited(stream,32768),StandardCharsets.UTF_8));
-                }
-                if (!"henyo.d1.htp-v79/1".equals(manifest.getString("contract"))) throw new Failure("runtime_mismatch");
-                JSONObject files=manifest.getJSONObject("files");
-                for(Iterator<String> names=files.keys();names.hasNext();) {
-                    String name=names.next();
-                    if(!name.matches("lib[A-Za-z0-9+_.-]+\\.so") || !sha(new File(nativeDir,name)).equals(files.getString(name)))
-                        throw new Failure("runtime_mismatch");
-                    check(ticket);
-                }
+                JSONObject manifest=verifyRuntime(nativeDir,ticket);
+                int architecture=discoverBackend(nativeDir,manifest,ticket);
                 directory.mkdirs(); File log=new File(directory,"worker.log");
                 int selectedPort;
                 try(ServerSocket socket=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"))) { selectedPort=socket.getLocalPort(); }
@@ -132,7 +122,7 @@ final class D1Runtime {
                     "-m",model.getPath(),"-c","2048","-b","2048","-ub","2048","-t","4","-tb","4","-np","1",
                     "--no-warmup","-lv","4","--device","HTPT0","--gpu-layers","999","--host","127.0.0.1",
                     "--port",String.valueOf(selectedPort),"--no-webui","--timeout","33","--api-key",selectedKey));
-                ProcessBuilder builder=nativeBuilder(args,nativeDir,log);
+                ProcessBuilder builder=nativeBuilder(args,nativeDir,log,architecture);
                 long begin=SystemClock.elapsedRealtime();
                 synchronized(this) { check(ticket); started=builder.start();process=started;port=selectedPort;key=selectedKey; }
                 long deadline=begin+120000L;
@@ -144,11 +134,12 @@ final class D1Runtime {
                 }
                 String text;
                 try(InputStream stream=new FileInputStream(log)) { text=new String(readLimited(stream,1048576),StandardCharsets.UTF_8); }
-                if(!text.contains("Hexagon Arch version v79")||!text.contains("offloaded 25/25 layers")
+                if(D1BackendPolicy.architecture(text)!=architecture||!text.contains("offloaded 25/25 layers")
                     ||!text.contains("HTPT0 model buffer size")||!text.contains("build 11960 (8642541b2)"))throw new Failure("backend_unavailable");
                 synchronized(this) {
                     check(ticket);startupMs=SystemClock.elapsedRealtime()-begin;lastUse=SystemClock.elapsedRealtime();state="ready";error="";
                     idleHandler.removeCallbacks(idleExpiry);idleHandler.postDelayed(idleExpiry,300000L);
+                    android.util.Log.i("HenyoD1","Ready on Hexagon v"+architecture+" ("+D1BackendPolicy.profile(architecture)+"), 25/25 layers");
                 }
             } catch(Exception failure) {
                 android.util.Log.w("HenyoD1", "Preparation failed: " + (failure instanceof Failure ? ((Failure)failure).code : failure.getClass().getSimpleName()));
@@ -158,7 +149,44 @@ final class D1Runtime {
             } finally { synchronized(this){preparing=false;if(lifecycle.restartAfter(ticket)&&enabled())prepare();} }
         },"henyo-d1-prepare").start();
     }
-    private ProcessBuilder nativeBuilder(List<String> args,File nativeDir,File log) {
+    private JSONObject verifyRuntime(File nativeDir,long ticket)throws Exception {
+        JSONObject manifest;
+        try(InputStream stream=context.getAssets().open("d1-runtime.json")) {
+            manifest=new JSONObject(new String(readLimited(stream,32768),StandardCharsets.UTF_8));
+        }
+        String contract=manifest.getString("contract");
+        if(!D1BackendPolicy.LEGACY_CONTRACT.equals(contract)&&!D1BackendPolicy.CONTRACT.equals(contract))
+            throw new Failure("runtime_mismatch");
+        JSONObject files=manifest.getJSONObject("files");
+        for(Iterator<String> names=files.keys();names.hasNext();) {
+            String name=names.next();
+            if(!name.matches("lib[A-Za-z0-9+_.-]+\\.so")||!sha(new File(nativeDir,name)).equals(files.getString(name)))
+                throw new Failure("runtime_mismatch");
+            check(ticket);
+        }
+        return manifest;
+    }
+    private int discoverBackend(File nativeDir,JSONObject manifest,long ticket)throws Exception {
+        directory.mkdirs();File log=new File(directory,"worker.log");Process probe;
+        synchronized(this) {
+            check(ticket);
+            probe=nativeBuilder(Arrays.asList(new File(nativeDir,"libhenyo-d1.so").getPath(),"-lv","4","--list-devices"),nativeDir,log,0).start();
+            process=probe;
+        }
+        boolean exited=false;
+        try { exited=probe.waitFor(5,java.util.concurrent.TimeUnit.SECONDS); }
+        finally { synchronized(this) { if(process==probe){if(!exited)stopWorker();else process=null;} } }
+        check(ticket);
+        if(!exited||probe.exitValue()!=0)throw new Failure("backend_unavailable");
+        String text;
+        try(InputStream stream=new FileInputStream(log)){text=new String(readLimited(stream,65536),StandardCharsets.UTF_8);}
+        int architecture=D1BackendPolicy.architecture(text);
+        String library="libggml-htp-v"+architecture+".so";
+        if(!D1BackendPolicy.accepts(manifest.getString("contract"),architecture)||!text.contains("HTPT0:")
+            ||!manifest.getJSONObject("files").has(library)||!new File(nativeDir,library).isFile())throw new Failure("backend_unavailable");
+        return architecture;
+    }
+    private ProcessBuilder nativeBuilder(List<String> args,File nativeDir,File log,int architecture) {
         ProcessBuilder builder=new ProcessBuilder(args).directory(directory).redirectErrorStream(true).redirectOutput(log);
         Map<String,String> env=builder.environment();
         for(String name:new ArrayList<>(env.keySet()))if(name.startsWith("GGML_")||name.startsWith("HENYO_D1_")||name.equals("LD_PRELOAD"))env.remove(name);
@@ -166,10 +194,7 @@ final class D1Runtime {
         env.put("ADSP_LIBRARY_PATH",nativeDir.getPath()+";/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/vendor/dsp;/dsp");
         env.put("GGML_BACKEND_PATH",new File(nativeDir,"libggml-hexagon-tuned.so").getPath());
         env.put("GGML_HEXAGON_OPPOLL","1");env.put("GGML_HEXAGON_POWER_MODE","sustained_high_performance");
-        String[][] flags={{"NPU_STENCIL","1"},{"PAIR_GLU","1"},{"PAIR_MAX_TOKENS","0"},{"SELECT_LAST","1"},
-            {"SELECT_FFN","1"},{"SELECT_PAD","1"},{"SELECT_MIN_TOKENS","256"},{"RESIDUAL_NORM","1"},
-            {"HMX_SCOPE","down"},{"HMX_M","0"},{"HMX_N","adaptive"},{"GATE_LONG_TUNE","1"}};
-        for(String[] flag:flags)env.put("HENYO_D1_"+flag[0],flag[1]);
+        env.putAll(D1BackendPolicy.environment(architecture));
         env.put("HENYO_D1_OWNER_PID",String.valueOf(android.os.Process.myPid()));
         return builder;
     }
@@ -186,22 +211,8 @@ final class D1Runtime {
             try {
                 directory.mkdirs();
                 // Discover the actual accelerator before downloading a large model.
-                File nativeDir=new File(context.getApplicationInfo().nativeLibraryDir),log=new File(directory,"worker.log");
-                Process probe;
-                synchronized(this) {
-                    check(ticket);
-                    probe=nativeBuilder(Arrays.asList(new File(nativeDir,"libhenyo-d1.so").getPath(),"-lv","4","--list-devices"),nativeDir,log).start();
-                    process=probe;
-                }
-                boolean exited=probe.waitFor(5,java.util.concurrent.TimeUnit.SECONDS);
-                synchronized(this) {
-                    if(process==probe){if(!exited)stopWorker();else process=null;}
-                }
-                check(ticket);
-                if(!exited||probe.exitValue()!=0)throw new Failure("backend_unavailable");
-                String probeLog;
-                try(InputStream input=new FileInputStream(log)){probeLog=new String(readLimited(input,65536),StandardCharsets.UTF_8);}
-                if(!probeLog.contains("Hexagon Arch version v79")||!probeLog.contains("HTPT0:"))throw new Failure("backend_unavailable");
+                File nativeDir=new File(context.getApplicationInfo().nativeLibraryDir);
+                discoverBackend(nativeDir,verifyRuntime(nativeDir,ticket),ticket);
                 URL url=new URL(MODEL_URL);
                 HttpURLConnection connection=(HttpURLConnection)url.openConnection();
                 connection.setConnectTimeout(15000);connection.setReadTimeout(15000);
