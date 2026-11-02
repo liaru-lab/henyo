@@ -1,7 +1,9 @@
 # d1-2B on-device evaluation
 
-For the opt-in native NPU experiment and necessary-condition readiness checks,
-see [Hexagon execution and readiness](HEXAGON.md).
+For the consolidated opt-in NPU execution candidate, see
+[Native runtime integration](NATIVE.md). The earlier paired-kernel experiment
+and necessary-condition checks are described in
+[Hexagon execution and readiness](HEXAGON.md).
 
 This is a standalone experiment, outside the APK and production control path. It evaluates whether CPU or OpenCL GPU decision inference can improve a Henyo control loop while keeping observations local. The runner uses only generated English/Japanese fixtures and never sends UI events.
 
