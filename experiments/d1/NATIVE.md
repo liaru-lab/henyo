@@ -8,8 +8,9 @@ or starting this standalone adapter does not enable Android control.
 
 The supported combination is llama.cpp
 `8642541b255bfb5dc39cd351a178be09013a55d6`, the pinned d1-2B Q4_K_M model in
-[README.md](README.md), Android arm64 and Hexagon v79. Other architectures,
-models and concurrent requests have not been validated.
+[README.md](README.md), Android arm64 and Hexagon v79. The Android packager can
+also include a matched v81 DSP with the conservative profile described below.
+Other generations, models and concurrent requests have not been validated.
 
 ## Source and build
 
@@ -77,6 +78,25 @@ python PATCHED_SOURCE/ggml/src/ggml-hexagon/htp/htp-swiv.py \
 Independently verify SWIV CRC, dynamic ABI, unchanged load layout/code/data and
 absence of all mapped roots before assembling the bundle. Never distribute a
 DSP whose integrity metadata predates stripping or other ELF changes.
+
+For the optional v81 APK component, use the same pinned patched source and
+SDK/toolchain with a fresh DSP build directory such as `artifacts/d1-dsp-v81`.
+Change `DSP_VERSION` to `v81` and `PREBUILT_LIB_DIR` to `toolv21_v81`; retain
+the compiler prefix maps, LTO and final SWIV verification described above.
+Apply finalization to `libggml-htp-v81.so` and do not modify its bytes afterward.
+Keep the normal v79 bundle and add this separately verified component when
+preparing a new Android runtime:
+
+```sh
+python scripts/prepare-d1-android.py --bundle VALIDATED_V79_BUNDLE \
+  --source PATCHED_PINNED_SOURCE --output artifacts/d1-android-v79-v81 \
+  --v81-dsp artifacts/d1-dsp-v81/libggml-htp-v81.so --v81-sha256 V81_SHA256
+```
+
+The APK selects the profile from the actual accelerator: v79 retains stable
+tuning, while v81 disables DMA64 and the additional graph/fusion/shape tuning.
+The standalone adapter and its bundle contract below remain v79-specific.
+Neither packaging nor merging this source enables assistance or publishes an APK.
 
 The base build uses the Android toolchain's shared C++ runtime. This differs
 from the official base binary's embedded runtime. Bundle the matching
