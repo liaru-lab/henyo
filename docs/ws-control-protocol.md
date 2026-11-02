@@ -603,6 +603,9 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 | `global.home` | `POST /v1/global/home` | none | Existing global-action payload |
 | `screen.screenshot` | `GET /v1/screen/screenshot` | `timeout`, `includeIndicator`; optional target fields | Indicator-free targeted PNG metadata/data by default, capture timing, and a screenshot-to-screen coordinate mapping |
 | `termux.exec` | WS only | `commandPath`, `arguments`, `workdir`, `stdin`, `timeout` | Structured bounded stdout/stderr, exit code, Termux internal error, original lengths, and duration |
+| `assistance.status` | WS only | none | User-enabled state, model/runtime availability and preparation status |
+| `assistance.prepare` | WS only | none | Prepare an already enabled, downloaded local model without changing the user's setting |
+| `assistance.evaluate` | WS only | `state`, single `questions` object | Optional local d1 evaluation; returns answers, never dispatches UI input |
 | `task.progress.set` | WS only | structured full snapshot: `goal`, ordered `steps[{text,status}]`, optional `replan`; or legacy `goal`, `completed`, `current` | Presentation application acknowledgement; never echoes text |
 | `task.progress.finish` | WS only | none; matching envelope `taskId` required | Complete the task, return control, and briefly present `Completed` |
 | `task.completion.show` | WS only | required `message` string, 1–250 Unicode code points; matching envelope `taskId` | Complete the task and briefly present its final message; never echoes text |

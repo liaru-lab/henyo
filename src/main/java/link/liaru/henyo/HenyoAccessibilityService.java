@@ -101,10 +101,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private final ThreadLocal<String> requestBearerToken = new ThreadLocal<>();
     private final ThreadLocal<String> requestTargetContextId = new ThreadLocal<>();
     private final ThreadLocal<Long> requestControlTicket = new ThreadLocal<>();
+    private final ThreadLocal<WsSession> requestWsSession = new ThreadLocal<>();
     private final ThreadLocal<OperationDeadline> requestDeadline = new ThreadLocal<>();
     private final ThreadLocal<Runnable> requestVisualCue = new ThreadLocal<>();
     private final ThreadLocal<ConditionalWorkflow.Target> requestWorkflowTarget = new ThreadLocal<>();
     private final ThreadLocal<String> requestTaskId = new ThreadLocal<>();
+    private final ThreadLocal<Long> requestAssistanceEpoch = new ThreadLocal<>();
     private final TaskLifecycle taskLifecycle = new TaskLifecycle();
     private final ThreadLocal<Boolean> requestSensitiveGrant = ThreadLocal.withInitial(() -> false);
     private final ThreadLocal<Boolean> requestMutationAccepted = ThreadLocal.withInitial(() -> false);
@@ -168,6 +170,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         running = true;
         instance = this;
+        D1Runtime.get(this).resume();
         serviceEpoch = UUID.randomUUID().toString();
         synchronized (captureMappingsLock) {
             captureMappings.clear();
@@ -251,6 +254,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         running = false;
+        D1Runtime.get(this).suspend();
         ControlActionReceiver.cancel(this);
         if (instance == this) instance = null;
         if (connectionStatusOverlay != null) {
@@ -268,6 +272,12 @@ public class HenyoAccessibilityService extends AccessibilityService {
         // Drain callbacks so that hardware buffers are released even at shutdown.
         screenshotExecutor.shutdown();
         super.onDestroy();
+    }
+
+    @Override
+    protected void dump(java.io.FileDescriptor fd, java.io.PrintWriter writer, String[] args) {
+        if(args!=null&&java.util.Arrays.asList(args).contains("--d1"))D1Runtime.get(this).dump(writer);
+        else super.dump(fd,writer,args);
     }
 
     static void setTailscaleWatchdogEnabled(Context context, boolean enabled) {
@@ -288,6 +298,20 @@ public class HenyoAccessibilityService extends AccessibilityService {
     static ObservationEffectModel.Mode observationMode(Context context) {
         return ObservationEffectModel.Mode.fromValue(context.getSharedPreferences("presentation", MODE_PRIVATE)
                 .getString("observation_effect", ObservationEffectModel.Mode.FRAME_GLOW.value));
+    }
+
+    static int messageBackgroundOpacity(Context context) {
+        return MessagePanelStyle.clamp(context.getSharedPreferences("presentation", MODE_PRIVATE)
+                .getInt("message_background_opacity", MessagePanelStyle.DEFAULT_OPACITY));
+    }
+
+    static void setMessageBackgroundOpacity(Context context, int value) {
+        int percent = MessagePanelStyle.clamp(value);
+        context.getSharedPreferences("presentation", MODE_PRIVATE).edit()
+                .putInt("message_background_opacity", percent).apply();
+        HenyoAccessibilityService service = instance;
+        if (service != null && service.connectionStatusOverlay != null)
+            service.connectionStatusOverlay.setMessageBackgroundOpacity(percent);
     }
 
     static void setObservationMode(Context context, ObservationEffectModel.Mode mode) {
@@ -314,6 +338,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
             }
         }
         context.getSharedPreferences("control", MODE_PRIVATE).edit().putBoolean("stopped", stopped).apply();
+        if(stopped) D1Runtime.get(context).suspend();
         if (service != null) service.updateControlPresentation();
     }
 
@@ -327,7 +352,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
         ControlActionReceiver.updateNotification(this, stopped);
     }
 
+    private void checkRequestSession() {
+        WsSession session = requestWsSession.get();
+        if (session != null && (session.closed || !session.authenticated))
+            throw new ControlOwnership.Unavailable("control_stopped");
+    }
+
     private void checkControl() {
+        checkRequestSession();
         checkDeadline();
         Long ticket = requestControlTicket.get();
         if (ticket == null) throw new ControlOwnership.Unavailable("control_stopped");
@@ -346,6 +378,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private void checkDeadline() {
+        checkRequestSession();
         OperationDeadline deadline = requestDeadline.get();
         if (deadline != null && deadline.expired(System.nanoTime()))
             throw new OperationFailure("deadline_exceeded", 408, "not_applied");
@@ -408,7 +441,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private <T> T controlledDispatch(java.util.function.Supplier<T> action) {
         checkControl();
         T dispatched = controlOwnership.dispatch(requestControlTicket.get(), currentTargetContextId(), () -> {
+            checkRequestSession();
             checkDeadline();
+            Long epoch=requestAssistanceEpoch.get();
+            if(epoch!=null) {
+                D1Runtime runtime=D1Runtime.get(this);
+                if(!runtime.enabled())throw new OperationFailure("assistance_disabled",409,"not_applied");
+                if(runtime.epoch()!=epoch)throw new OperationFailure("workflow_semantic_changed",409,"not_applied");
+            }
             T result;
             try { result = action.get(); }
             catch (RuntimeException e) {
@@ -802,22 +842,28 @@ public class HenyoAccessibilityService extends AccessibilityService {
             if (authenticated) {
                 session.sendText("{\"type\":\"event\",\"event\":\"session.authenticated\"}");
             }
-            while (running && !socket.isClosed()) {
+            while (running && !socket.isClosed() && !session.closed) {
                 long now = SystemClock.elapsedRealtime();
                 if (WebSocketSessionPolicy.isControlIdle(session.lastControlActivityElapsedRealtimeMs, now)) {
-                    closeIdleWsSession(session);
-                    return;
+                    if (session.operations.hasWork()) session.touchControlActivity();
+                    else { closeIdleWsSession(session); return; }
                 }
                 WebSocketProtocol.DecodedFrame frame;
                 try {
                     frame = readWsFrame(socket, in, WebSocketSessionPolicy.controlIdleDeadlineMs(
                             session.lastControlActivityElapsedRealtimeMs));
-                } catch (SocketTimeoutException ignored) {
+                } catch (WsFirstByteTimeout idle) {
+                    // No frame byte was consumed: completion may have refreshed the idle clock.
+                    if (session.operations.hasWork()) session.touchControlActivity();
+                    else if (WebSocketSessionPolicy.isControlIdle(session.lastControlActivityElapsedRealtimeMs,
+                            SystemClock.elapsedRealtime())) { closeIdleWsSession(session); return; }
+                    continue;
+                } catch (SocketTimeoutException partialFrameTimedOut) {
                     closeIdleWsSession(session);
                     return;
                 }
                 if (frame.opcode == WebSocketProtocol.OPCODE_CLOSE) {
-                    session.sendClose(1000, "bye");
+                    session.closeFromPeer();
                     return;
                 }
                 if (frame.opcode == WebSocketProtocol.OPCODE_PING) {
@@ -836,6 +882,10 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 } else if ("hello".equals(type)) {
                     session.sendText(sessionReadyJson(authenticated));
                 } else if ("auth".equals(type)) {
+                    if (session.operations.hasWork()) {
+                        sendWsError(session, id, "session_busy", "Wait for pending operations before authenticating again");
+                        continue;
+                    }
                     BearerTokenManager.Verification verification = tokens().verify(message.get("token"), sourceAddress.getHostAddress());
                     if (verification.ok) {
                         if (!session.sessionTokenId.equals(verification.record.id)
@@ -866,73 +916,36 @@ public class HenyoAccessibilityService extends AccessibilityService {
                             authenticated = false;
                             sessionToken = "";
                             session.authenticated = false;
-                            session.sessionToken = "";
-                            session.sessionTokenId = "";
                             refreshConnectionStatusOverlay();
                             sendWsError(session, id, verification.revoked ? "auth_revoked" : "auth_invalid", "Bearer token is invalid");
                             continue;
                         }
                     }
-                    if ("batch".equals(type)) {
-                        if (id.isEmpty()) {
-                            sendWsError(session, id, "op_invalid", "Batch frames require id");
+                    if ("batch".equals(type) || "call".equals(type)) {
+                        boolean batch = "batch".equals(type);
+                        String op = message.getOrDefault("op", "");
+                        if (id.isEmpty() || (!batch && op.isEmpty())) {
+                            sendWsError(session, id, "op_invalid", "Call/batch frames require id and calls require op");
                             continue;
                         }
-                        session.touchControlActivity();
-                        OperationDeadline deadline = deadlineFor(message, receivedNanos, 300_000L);
+                        OperationDeadline deadline = deadlineFor(message, receivedNanos, batch ? 300_000L : 120_000L);
                         if (deadline == null) {
                             sendWsError(session, id, "op_invalid", "Invalid timeoutMs");
                             continue;
                         }
-                        requestDeadline.set(deadline);
-                        try { requestTaskId.set(taskIdFor(message)); }
-                        catch (OperationFailure e) {
-                            requestDeadline.remove();
-                            sendWsError(session, id, e.code, e.code);
+                        String taskId;
+                        try { taskId = taskIdFor(message); }
+                        catch (OperationFailure failure) {
+                            sendWsError(session, id, failure.code, failure.code);
                             continue;
                         }
-                        requestControlTicket.set(controlOwnership.ticket());
-                        try {
-                            long queuedAt = System.nanoTime();
-                            synchronized (controlExecutionLock) {
-                                performanceMetrics.phases.record(PhaseTimings.Phase.REQUEST_QUEUE, System.nanoTime() - queuedAt);
-                                executeWsBatch(session, id, frame.text);
-                            }
-                        } catch (OperationFailure e) {
-                            session.sendText(WsCallResult.failure(id, e.code, e.outcome, 0L).toFrameJson());
-                        } finally {
-                            requestDeadline.remove();
-                            requestTaskId.remove();
-                            requestControlTicket.remove();
-                            session.touchControlActivity();
-                        }
-                    } else if ("call".equals(type)) {
-                        if (id.isEmpty() || message.getOrDefault("op", "").isEmpty()) {
-                            sendWsError(session, id, "op_invalid", "Call frames require type, id, and op");
-                            continue;
-                        }
+                        // Capture identity, ticket and deadline on admission, never after queueing.
+                        long ticket = controlOwnership.ticket();
+                        String token = session.sessionToken, tokenId = session.sessionTokenId;
                         session.touchControlActivity();
-                        WsCallResult result;
-                        OperationDeadline deadline = deadlineFor(message, receivedNanos, 120_000L);
-                        if (deadline == null) {
-                            sendWsError(session, id, "op_invalid", "Invalid timeoutMs");
-                            continue;
-                        }
-                        requestDeadline.set(deadline);
-                        requestControlTicket.set(controlOwnership.ticket());
-                        try {
-                            long queuedAt = System.nanoTime();
-                            synchronized (controlExecutionLock) {
-                                performanceMetrics.phases.record(PhaseTimings.Phase.REQUEST_QUEUE, System.nanoTime() - queuedAt);
-                                result = executeWsCall(session, id, message.get("op"), frame.text);
-                            }
-                        } finally {
-                            requestDeadline.remove();
-                            requestControlTicket.remove();
-                            session.touchControlActivity();
-                        }
-                        session.sendText(result.toFrameJson());
-                        schedulePostActionBurst(session, result, WsOperation.specFor(message.get("op")), actionIdFor(message, id));
+                        if (!session.operations.submit(() -> executeQueuedWsOperation(session, id, op,
+                                frame.text, batch, taskId, token, tokenId, ticket, deadline, receivedNanos)))
+                            sendWsError(session, id, "session_busy", "Session operation queue is full");
                     } else {
                         sendWsError(session, id, "op_invalid", "Call frames require type, id, and op");
                     }
@@ -944,6 +957,62 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
     }
 
+    private void executeQueuedWsOperation(WsSession session, String id, String op, String frameText,
+                                          boolean batch, String taskId, String token, String tokenId,
+                                          long ticket, OperationDeadline deadline, long receivedNanos) {
+        requestWsSession.set(session);
+        requestDeadline.set(deadline);
+        requestControlTicket.set(ticket);
+        requestTaskId.set(taskId);
+        requestBearerToken.set(token);
+        requestTargetContextId.set(tokenId.isEmpty() ? "local" : "token:" + tokenId);
+        try {
+            if (session.closed || !session.authenticated || !token.equals(session.sessionToken)
+                    || !tokenId.equals(session.sessionTokenId))
+                throw new ControlOwnership.Unavailable("control_stopped");
+            WsCallResult result = null;
+            synchronized (controlExecutionLock) {
+                performanceMetrics.phases.record(PhaseTimings.Phase.REQUEST_QUEUE, System.nanoTime() - receivedNanos);
+                checkDeadline();
+                lastTargetContextId = requestTargetContextId.get();
+                if (batch) executeWsBatch(session, id, frameText);
+                else result = executeWsCall(session, id, op, frameText);
+            }
+            if (!batch) {
+                session.sendText(result.toFrameJson());
+                if (!session.closed)
+                    schedulePostActionBurst(session, result, WsOperation.specFor(op),
+                            actionIdFor(parseJsonObject(frameText), id));
+            }
+        } catch (ControlOwnership.Unavailable unavailable) {
+            sendQueuedFailure(session, id, unavailable.code, failureOutcome("not_applied"));
+        } catch (OperationFailure failure) {
+            sendQueuedFailure(session, id, failure.code, failureOutcome(failure.outcome));
+        } catch (IOException disconnected) {
+            unregisterWsSession(session);
+        } catch (RuntimeException failure) {
+            sendQueuedFailure(session, id, "op_failed", failureOutcome("not_applied"));
+        } finally {
+            requestWsSession.remove();
+            requestDeadline.remove();
+            requestControlTicket.remove();
+            requestTaskId.remove();
+            requestBearerToken.remove();
+            requestTargetContextId.remove();
+            requestWorkflowTarget.remove();
+            requestAssistanceEpoch.remove();
+            requestMutationAccepted.remove();
+            requestSensitiveGrant.remove();
+            requestVisualCue.remove();
+            session.touchControlActivity();
+        }
+    }
+
+    private void sendQueuedFailure(WsSession session, String id, String code, String outcome) {
+        try { session.sendText(WsCallResult.failure(id, code, outcome, 0L).toFrameJson()); }
+        catch (IOException disconnected) { unregisterWsSession(session); }
+    }
+
     private static void closeIdleWsSession(WsSession session) throws IOException {
         session.sendText("{\"type\":\"event\",\"event\":\"session.closing\",\"reason\":\"idle_timeout\"}");
         session.sendClose(1000, "idle_timeout");
@@ -952,6 +1021,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
     private WsCallResult executeWsCall(WsSession session, String id, String op, String frameText) {
         String contextId = session == null || session.sessionTokenId.isEmpty()
                 ? "local" : "token:" + session.sessionTokenId;
+        String parentContextId = requestTargetContextId.get();
+        String parentBearerToken = requestBearerToken.get();
         requestTargetContextId.set(contextId);
         requestBearerToken.set(session == null ? "" : session.sessionToken);
         lastTargetContextId = contextId;
@@ -987,8 +1058,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
             requestMutationAccepted.set(parentMutation);
             requestSensitiveGrant.set(parentSensitiveGrant);
             requestVisualCue.remove();
-            requestTargetContextId.remove();
-            requestBearerToken.remove();
+            if (parentContextId == null) requestTargetContextId.remove(); else requestTargetContextId.set(parentContextId);
+            if (parentBearerToken == null) requestBearerToken.remove(); else requestBearerToken.set(parentBearerToken);
         }
     }
 
@@ -1019,6 +1090,32 @@ public class HenyoAccessibilityService extends AccessibilityService {
             return WsCallResult.ok(id, "{\"ok\":true,\"taskId\":\"" + escape(taskId) + "\"}", elapsed(started));
         }
         if (WsOperation.OP_WORKFLOW_RUN.equals(spec.op)) return executeWorkflow(session, id, paramsJson, started);
+        if (WsOperation.OP_ASSISTANCE_STATUS.equals(spec.op))
+            return WsCallResult.ok(id, D1Runtime.get(this).statusJson(), elapsed(started));
+        if (WsOperation.OP_ASSISTANCE_PREPARE.equals(spec.op)) {
+            checkAssistanceAdmission(session);
+            D1Runtime runtime = D1Runtime.get(this);
+            long epoch = runtime.epoch();
+            if (!runtime.enabled()) return WsCallResult.failure(id, "assistance_disabled", "not_applied", elapsed(started));
+            runtime.prepare();
+            checkAssistanceAdmission(session);
+            if (!runtime.enabled() || runtime.epoch() != epoch)
+                return WsCallResult.failure(id, "assistance_disabled", "not_applied", elapsed(started));
+            return WsCallResult.ok(id, runtime.statusJson(), elapsed(started));
+        }
+        if (WsOperation.OP_ASSISTANCE_EVALUATE.equals(spec.op)) {
+            try {
+                Runnable guard = () -> checkAssistanceAdmission(session);
+                guard.run();
+                WorkflowJson.checkBounded(paramsJson);
+                org.json.JSONObject response = D1Runtime.get(this).evaluate(new org.json.JSONObject(paramsJson), guard);
+                return WsCallResult.ok(id, response.toString(), elapsed(started));
+            } catch (D1Runtime.Failure failure) {
+                return WsCallResult.failure(id, failure.code, "not_applied", elapsed(started));
+            } catch (org.json.JSONException invalid) {
+                return WsCallResult.failure(id, "assistance_invalid", "not_applied", elapsed(started));
+            }
+        }
         if (("POST".equals(spec.httpMethod) && !WsOperation.OP_UI_FIND.equals(spec.op)
                 && !WsOperation.OP_UI_WAIT.equals(spec.op)) || WsOperation.OP_TERMUX_EXEC.equals(spec.op)
                 || WsOperation.OP_TASK_PROGRESS_SET.equals(spec.op)) checkControl();
@@ -1189,6 +1286,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         boolean stopped = false;
         boolean shouldBurst = false;
         for (int i = 0; i < steps.size(); i++) {
+            checkRequestSession();
             if (requestDeadline.get() != null && requestDeadline.get().expired(System.nanoTime())) {
                 if (i > 0) stepJson.append(",");
                 stepJson.append(WsCallResult.failure("batch-timeout", "batch_timeout", "not_applied", elapsed(started)).toStepJson());
@@ -1257,6 +1355,20 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return verification;
     }
 
+    private void checkAssistanceAdmission(WsSession session) {
+        checkDeadline();
+        if (session != null && (session.closed || !session.authenticated))
+            throw new ControlOwnership.Unavailable("control_stopped");
+        requireScope(requestBearerToken.get(), BearerTokenManager.SCOPE_CONTROL, "control_permission_required");
+        synchronized (controlOwnership) {
+            Long ticket = requestControlTicket.get();
+            if (ticket == null || controlOwnership.stopped() || ticket != controlOwnership.ticket())
+                throw new ControlOwnership.Unavailable("control_stopped");
+            if (!controlOwnership.isCurrent(ticket, currentTargetContextId()))
+                throw new ControlOwnership.Unavailable("control_owned");
+        }
+    }
+
     private OperationTargetConstraint workflowConstraint(OperationTargetConstraint requested) {
         ConditionalWorkflow.Target target = requestWorkflowTarget.get();
         if (target == null) return requested;
@@ -1319,6 +1431,35 @@ public class HenyoAccessibilityService extends AccessibilityService {
                 }
                 public long nowMs() { return SystemClock.elapsedRealtime(); }
                 public void pause(long millis) throws InterruptedException { Thread.sleep(millis); }
+                public ConditionalWorkflow.SemanticResult semantic(ConditionalWorkflow.Target target, ConditionalWorkflow.SemanticCondition condition) {
+                    try {
+                        D1Runtime runtime=D1Runtime.get(HenyoAccessibilityService.this);
+                        if(!runtime.enabled())return new ConditionalWorkflow.SemanticResult(false,"","assistance_disabled");
+                        long assistanceEpoch=runtime.epoch();
+                        org.json.JSONObject observation=semanticObservation(condition.candidate);
+                        org.json.JSONObject question=new org.json.JSONObject().put("type","noul").put("instructions",condition.question);
+                        org.json.JSONObject body=new org.json.JSONObject().put("state",observation)
+                                .put("questions",new org.json.JSONObject().put("match",question));
+                        org.json.JSONObject response=runtime.evaluate(body,HenyoAccessibilityService.this::checkControl);
+                        if(!runtime.enabled()||runtime.epoch()!=assistanceEpoch)
+                            return new ConditionalWorkflow.SemanticResult(false,"","assistance_disabled");
+                        double probability=response.getJSONObject("answers").getJSONObject("match").getDouble("noul");
+                        boolean accepted=Double.isFinite(probability)&&probability>=0.85&&probability<=1.0;
+                        return new ConditionalWorkflow.SemanticResult(accepted,assistanceEpoch+":"+observation.toString(),
+                                accepted?"":probability<=0.15?"workflow_semantic_mismatch":"workflow_semantic_uncertain");
+                    } catch(D1Runtime.Failure failure){return new ConditionalWorkflow.SemanticResult(false,"",failure.code);}
+                    catch(org.json.JSONException invalid){return new ConditionalWorkflow.SemanticResult(false,"","native_response_invalid");}
+                }
+                public boolean semanticCurrent(ConditionalWorkflow.Target target,ConditionalWorkflow.SemanticCondition condition,String fingerprint) {
+                    D1Runtime runtime=D1Runtime.get(HenyoAccessibilityService.this);
+                    if(!runtime.enabled())throw new OperationFailure("assistance_disabled",409,"not_applied");
+                    try{
+                        long epoch=Long.parseLong(fingerprint.substring(0,fingerprint.indexOf(':')));
+                        boolean current=fingerprint.equals(runtime.epoch()+":"+semanticObservation(condition.candidate).toString());
+                        if(current)requestAssistanceEpoch.set(epoch);
+                        return current;
+                    }catch(org.json.JSONException|IllegalArgumentException invalid){return false;}
+                }
                 public ConditionalWorkflow.Presence probe(ConditionalWorkflow.Target target, ConditionalWorkflow.Selector selector) {
                     long begin;
                     synchronized (uiTreeStateLock) { begin = uiEventSeq; }
@@ -1363,14 +1504,75 @@ public class HenyoAccessibilityService extends AccessibilityService {
                         return new ConditionalWorkflow.ActionResult(false, false, "workflow_invalid");
                     } catch (RuntimeException failure) {
                         return new ConditionalWorkflow.ActionResult(false, requestMutationAccepted.get(), "op_failed");
-                    } finally { requestMutationAccepted.set(prior || requestMutationAccepted.get()); }
+                    } finally { requestMutationAccepted.set(prior || requestMutationAccepted.get());requestAssistanceEpoch.remove(); }
                 }
             };
             return WsCallResult.workflow(id, new ConditionalWorkflow(plan, adapter).run(), elapsed(started));
         } finally {
+            requestAssistanceEpoch.remove();
             if (previousTarget == null) requestWorkflowTarget.remove(); else requestWorkflowTarget.set(previousTarget);
             if (previousDeadline == null) requestDeadline.remove(); else requestDeadline.set(previousDeadline);
         }
+    }
+
+    private org.json.JSONObject semanticObservation(ConditionalWorkflow.Selector selector) throws org.json.JSONException {
+        checkControl();long begin;synchronized(uiTreeStateLock){begin=uiEventSeq;}
+        TargetSnapshot snapshot=resolveTarget(OperationTargetConstraint.none(),true);
+        if(snapshot==null)throw new OperationFailure("tree_unavailable",409,"not_applied");
+        final org.json.JSONObject[] selected={null};
+        try {
+            SearchOptions query=new SearchOptions(selector.text.toLowerCase(Locale.ROOT),true,selector.field,false,true);
+            ConditionalWorkflow.Presence presence=WorkflowPredicateProbe.probe(snapshot.root,new WorkflowPredicateProbe.Access<AccessibilityNodeInfo>() {
+                public boolean matches(AccessibilityNodeInfo node) {
+                    checkControl();
+                    if(!node.isVisibleToUser()||!nodeMatches(node,query))return false;
+                    Rect bounds=new Rect();node.getBoundsInScreen(bounds);
+                    if(!node.isEnabled()||bounds.isEmpty()||!snapshot.actionableRegion.contains(bounds.centerX(),bounds.centerY()))
+                        throw new IllegalStateException("unavailable candidate");
+                    try {
+                        org.json.JSONObject value=semanticNode(node);
+                        org.json.JSONArray ancestors=new org.json.JSONArray(),children=new org.json.JSONArray();
+                        boolean clickable=node.isClickable();AccessibilityNodeInfo parent=node.getParent();
+                        for(int i=0;parent!=null;i++) {
+                            AccessibilityNodeInfo current=parent;parent=null;
+                            try {
+                                if(i>=8||!current.isEnabled())throw new IllegalStateException("incomplete ancestry");
+                                ancestors.put(semanticNode(current));clickable|=current.isClickable();parent=current.getParent();
+                            } finally {current.recycle();}
+                        }
+                        if(!clickable)throw new IllegalStateException("not actionable");
+                        int count=node.getChildCount();
+                        if(count>8)throw new IllegalStateException("candidate subtree too large");
+                        for(int i=0;i<count;i++) {
+                            AccessibilityNodeInfo child=node.getChild(i);
+                            if(child==null)throw new IllegalStateException("incomplete candidate");
+                            try{children.put(semanticNode(child));}finally{child.recycle();}
+                        }
+                        value.put("ancestors",ancestors);value.put("children",children);selected[0]=value;
+                    }catch(org.json.JSONException invalid){throw new IllegalStateException(invalid);}
+                    return true;
+                }
+                public int childCount(AccessibilityNodeInfo node){return node.getChildCount();}
+                public AccessibilityNodeInfo child(AccessibilityNodeInfo node,int index){return node.getChild(index);}
+                public void recycle(AccessibilityNodeInfo node){node.recycle();}
+            });
+            synchronized(uiTreeStateLock){if(uiEventSeq!=begin)throw new OperationFailure("workflow_semantic_changed",409,"not_applied");}
+            if(presence!=ConditionalWorkflow.Presence.PRESENT||selected[0]==null)
+                throw new OperationFailure("workflow_needs_agent",409,"not_applied");
+            checkControl();return new org.json.JSONObject().put("candidate",selected[0]);
+        } finally {snapshot.root.recycle();}
+    }
+
+    private static org.json.JSONObject semanticNode(AccessibilityNodeInfo node) throws org.json.JSONException {
+        Rect bounds=new Rect();node.getBoundsInScreen(bounds);
+        return new org.json.JSONObject().put("text",semanticText(str(node.getText())))
+                .put("description",semanticText(str(node.getContentDescription())))
+                .put("viewId",semanticText(str(node.getViewIdResourceName())))
+                .put("enabled",node.isEnabled()).put("clickable",node.isClickable()).put("bounds",boundsString(bounds));
+    }
+    private static String semanticText(String value) {
+        if(value.codePointCount(0,value.length())>128)throw new IllegalStateException("semantic context exceeds text budget");
+        return value;
     }
 
     private SensitiveTreeInspector.Result inspectSensitiveRoot(AccessibilityNodeInfo root) {
@@ -1890,12 +2092,16 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return "action-" + actionSeq;
     }
 
+    private static final class WsFirstByteTimeout extends SocketTimeoutException {}
+
     private WebSocketProtocol.DecodedFrame readWsFrame(Socket socket, InputStream in, long idleDeadlineMs) throws IOException {
         ByteArrayOutputStream frame = new ByteArrayOutputStream();
         // Every byte in the frame shares the same absolute control-idle
         // deadline. A client cannot keep a session alive by dribbling a partial
         // header or payload, and each byte read does not restart the 60s clock.
-        int first = readRequiredByteBefore(socket, in, idleDeadlineMs);
+        int first;
+        try { first = readRequiredByteBefore(socket, in, idleDeadlineMs); }
+        catch (SocketTimeoutException idle) { throw new WsFirstByteTimeout(); }
         int second = readRequiredByteBefore(socket, in, idleDeadlineMs);
         frame.write(first);
         frame.write(second);
@@ -2211,14 +2417,15 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private static String capabilitiesJson() {
-        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\",\"conditionalWorkflows\"");
+        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\",\"conditionalWorkflows\",\"onDeviceAssistance\"");
         if (Build.VERSION.SDK_INT >= 30) {
             features.append(",\"displayTargeting\",\"displayCapture\",\"screenshotCoordinates\"");
         }
         if (Build.VERSION.SDK_INT >= 34) features.append(",\"windowCapture\"");
         features.append("]");
         return "{\"profile\":\"" + CAPABILITY_PROFILE + "\",\"features\":" + features +
-                ",\"limits\":{},\"operations\":{\"workflow.run\":{\"mutates\":true,\"experimental\":true,\"maxSteps\":16,\"maxDepth\":2,\"maxBudgetMs\":5000}}}";
+                ",\"assistance\":" + (instance == null ? "{\"enabled\":false,\"state\":\"disabled\"}" : D1Runtime.get(instance).statusJson()) +
+                ",\"limits\":{},\"operations\":{\"workflow.run\":{\"mutates\":true,\"experimental\":true,\"semanticConditions\":true,\"maxSteps\":16,\"maxDepth\":2,\"maxBudgetMs\":5000}}}";
     }
 
     private Response remoteAccessStatus() {
@@ -4986,6 +5193,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         final Socket socket;
         final OutputStream out;
         final Object writeLock = new Object();
+        final SessionOperationQueue operations;
         volatile boolean authenticated;
         volatile boolean closed;
         volatile String sessionToken = "";
@@ -5000,6 +5208,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
         WsSession(Socket socket, OutputStream out) {
             this.socket = socket;
             this.out = out;
+            this.operations = new SessionOperationQueue(8, failure -> closeQuietly());
             this.lastControlActivityElapsedRealtimeMs = SystemClock.elapsedRealtime();
         }
 
@@ -5037,8 +5246,31 @@ public class HenyoAccessibilityService extends AccessibilityService {
             }
         }
 
+        void closeFromPeer() throws IOException {
+            // Publish cancellation before a possibly blocked response writer can delay the ACK.
+            closed = true;
+            operations.close();
+            Thread deadline = new Thread(() -> {
+                try { Thread.sleep(100L); }
+                catch (InterruptedException finished) { Thread.currentThread().interrupt(); }
+                finally { HenyoAccessibilityService.closeQuietly(socket); }
+            }, "henyo-ws-close");
+            deadline.setDaemon(true);
+            deadline.start();
+            try {
+                synchronized (writeLock) {
+                    out.write(WebSocketProtocol.encodeClose(1000, "bye"));
+                    out.flush();
+                }
+            } finally {
+                HenyoAccessibilityService.closeQuietly(socket);
+                deadline.interrupt();
+            }
+        }
+
         void closeQuietly() {
             closed = true;
+            operations.close();
             HenyoAccessibilityService.closeQuietly(socket);
         }
     }

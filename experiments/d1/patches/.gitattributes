@@ -1,0 +1,2 @@
+# Unified-diff context may end with a space; check added code with git apply --whitespace=error.
+native-d1-runtime.patch whitespace=-blank-at-eol

@@ -15,6 +15,12 @@ usage() {
 VERSION_NAME=$1
 VERSION_CODE=$2
 
+if [[ -z ${HENYO_D1_ANDROID_RUNTIME:-} || ! -f "$HENYO_D1_ANDROID_RUNTIME/assets/d1-runtime.json" ||
+      ! -f "$HENYO_D1_ANDROID_RUNTIME/lib/arm64-v8a/libhenyo-d1.so" ]]; then
+    echo "release build: prepare the pinned Android d1 runtime and set HENYO_D1_ANDROID_RUNTIME" >&2
+    exit 1
+fi
+
 if [[ ! -f "$CREDENTIALS_FILE" ]]; then
     echo "release build: signing credentials not found: $CREDENTIALS_FILE" >&2
     exit 1

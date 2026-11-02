@@ -106,6 +106,45 @@ bin/henyo open-uri 'example-app://resource/123' --intent "Opening the requested 
 Treat HTTP v1 UI/control endpoints as compatibility/debug surfaces, not the
 normal automation path.
 
+## Optional on-device assistance
+
+Before using local d1 checks, discover `onDeviceAssistance` through
+`bin/henyo version`, then run `bin/henyo assistance status`. Require `enabled`
+and `state: ready`; a packaged runtime alone does not prove accelerator support.
+Respect the device user's setting. The agent cannot enable assistance or start
+the model download. Continue with ordinary control when it is disabled or
+unavailable. For an enabled, stored model in `idle`, request
+`bin/henyo assistance prepare` once and wait boundedly for `ready`; avoid
+repeated initialization requests or assuming that preparation has completed.
+
+Read `docs/on-device-assistance.md` in the selected Henyo checkout before using
+semantic workflow steps or `bin/henyo assistance evaluate FILE`. Prefer a short
+teacher-defined fragment with explicit target, candidate selector, local
+question, bounded wait and final app-outcome verification. Use deterministic
+presence/uniqueness checks and loading waits before requesting semantics. The
+server supplies the candidate's bounded local context; questions requiring a
+different screen or global task reasoning belong to the teacher agent.
+
+Treat a model answer as advisory. Follow the implemented confidence/abstention
+policy and revalidate the current target/context before mutation. Do not use a
+high score to override Stop, ambiguity, permissions or failed completion checks.
+`assistance.evaluate` returns a decision without performing an action.
+
+After failure, retain the partial result, observe fresh UI, identify accepted
+effects, and perform only the necessary corrective operations. Compare the
+teacher trace against the fragment: was it loading, a selector/context change,
+a semantic error or a failed final postcondition? Update that part before
+reusing a recipe. Never replay the entire partially completed fragment.
+Retain both successes and failures in session context or authorized local
+artifacts; re-resolve target identities on every reuse. A few successful runs
+do not establish a general rule. The shipped feature does not automatically
+train weights, promote recipes or accumulate captured UI as a training corpus.
+
+Report warm inference separately from startup and complete-task latency.
+The model uses device resources only when prepared; the UI/control thread must
+remain responsive. Keep raw decisions, traces and screenshots under ignored
+`artifacts/`, following the existing privacy guidance below.
+
 ## User-visible Intent
 
 Add a concise `--intent` explanation to meaningful observation and control

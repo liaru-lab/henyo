@@ -62,6 +62,7 @@ public class MainActivity extends Activity {
     private Switch tailscaleWatchdogEnabled;
     private RadioGroup bindHostGroup;
     private EditText cidrs;
+    private TextView assistanceStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -83,11 +84,11 @@ public class MainActivity extends Activity {
         status = bodyText();
         root.addView(status);
         controlButton = new Button(this);
-        controlButton.setOnClickListener(v -> {
+        controlButton.setOnClickListener(v -> handler.post(() -> {
             HenyoAccessibilityService.setControlStopped(this,
                     !HenyoAccessibilityService.isControlStopped(this));
             updateStatus();
-        });
+        }));
         root.addView(controlButton);
 
         root.addView(sectionTitle("Targeting"));
@@ -115,6 +116,68 @@ public class MainActivity extends Activity {
             if (index >= 0 && index < modes.length) HenyoAccessibilityService.setObservationMode(this, modes[index]);
         });
         root.addView(observationModes);
+
+        root.addView(sectionTitle("Message appearance"));
+        root.addView(label("Message background opacity"));
+        TextView opacityValue = bodyText();
+        int initialOpacity = HenyoAccessibilityService.messageBackgroundOpacity(this);
+        opacityValue.setText(initialOpacity + "%");
+        root.addView(opacityValue);
+        MessagePanelPreview panelPreview = new MessagePanelPreview(this, initialOpacity);
+        android.widget.SeekBar opacitySlider = new android.widget.SeekBar(this);
+        opacitySlider.setMax(100);
+        opacitySlider.setProgress(initialOpacity);
+        opacitySlider.setContentDescription("Message background opacity");
+        opacitySlider.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(android.widget.SeekBar bar, int progress, boolean fromUser) {
+                opacityValue.setText(progress + "%");
+                panelPreview.setOpacity(progress);
+                HenyoAccessibilityService.setMessageBackgroundOpacity(MainActivity.this, progress);
+            }
+            public void onStartTrackingTouch(android.widget.SeekBar bar) {}
+            public void onStopTrackingTouch(android.widget.SeekBar bar) {}
+        });
+        root.addView(opacitySlider);
+        root.addView(panelPreview, new LinearLayout.LayoutParams(-1, dp(216)));
+        Switch darkPreview = new Switch(this);
+        darkPreview.setText("Preview on dark background");
+        darkPreview.setOnCheckedChangeListener((button, checked) -> panelPreview.setDark(checked));
+        root.addView(darkPreview);
+        Button resetOpacity = new Button(this);
+        resetOpacity.setText("Reset to default");
+        resetOpacity.setOnClickListener(v -> opacitySlider.setProgress(MessagePanelStyle.DEFAULT_OPACITY));
+        styleSecondaryButton(resetOpacity);
+        root.addView(resetOpacity);
+
+        root.addView(sectionTitle("On-device assistance"));
+        D1Runtime assistance = D1Runtime.get(this);
+        Switch enableAssistance = new Switch(this);
+        enableAssistance.setText("Enable on-device assistance");
+        enableAssistance.setChecked(assistance.enabled());
+        enableAssistance.setOnCheckedChangeListener((button, checked) -> {
+            assistance.setEnabled(checked);
+            handler.post(this::updateStatus);
+        });
+        root.addView(enableAssistance);
+        TextView assistanceHelp = bodyText();
+        assistanceHelp.setText("Optional local d1 model for agent-defined UI checks. Requires a supported NPU and a separate 1.02 GiB model download. Existing control works with this off.");
+        root.addView(assistanceHelp);
+        assistanceStatus = bodyText();
+        assistanceStatus.setText(assistance.statusText());
+        root.addView(assistanceStatus);
+        Button downloadModel = new Button(this);
+        downloadModel.setText("Download model");
+        downloadModel.setOnClickListener(v -> {
+            if (!assistance.enabled()) showMessage("Enable on-device assistance first.");
+            else { assistance.download(); handler.post(this::updateStatus); }
+        });
+        styleSecondaryButton(downloadModel);
+        root.addView(downloadModel);
+        Button prepareModel = new Button(this);
+        prepareModel.setText("Prepare model");
+        prepareModel.setOnClickListener(v -> { assistance.prepare(); handler.post(this::updateStatus); });
+        styleSecondaryButton(prepareModel);
+        root.addView(prepareModel);
 
         root.addView(sectionTitle("Remote Access"));
         remoteEnabled = new Switch(this);
@@ -319,6 +382,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateStatus() {
+        if (assistanceStatus != null) assistanceStatus.setText(D1Runtime.get(this).statusText());
         controlButton.setText(HenyoAccessibilityService.isControlStopped(this)
                 ? "Resume control" : "Stop control");
         RemoteAccessConfig config = RemoteAccessConfig.load(this);

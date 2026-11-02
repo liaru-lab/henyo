@@ -22,6 +22,12 @@ A plan has `target` (`package`, `windowId`, `displayId`), `steps`, a mandatory e
 
 `if` optionally takes `else`; `require` takes a selector and stops unless it is present. `wait` performs read-only polling. Actions are limited to exact-selector `ui.click`, `ui.setText` (also `value`), and `ui.scroll` (`direction` and optional `duration`). No scripts, app switching, global keys, nested workflows, or workflows inside batches are supported.
 
+With optional on-device assistance enabled and ready, `semantic` can check a
+uniquely selected candidate before the next planned action. See
+[On-device assistance](on-device-assistance.md) for the schema, context limits,
+confidence policy, revalidation and teacher-correction workflow. Ordinary
+workflows continue to work without the model.
+
 Limits: 32 KiB plan, 16 steps including all branches and final verification, two branch levels, five seconds overall, two seconds per wait, 256 code points per selector, 1024 code points per text value, and 1000 ms per scroll. Native calls retain their existing bounds and permissions. The earlier caller deadline also applies.
 
 A predicate must have exactly one visible, actionable match in a complete bounded traversal. Duplicate matches, inaccessible children, traversal limits, changing observations, or occlusion are unknown, never absence. Branch guards are checked again before the first mutation in that branch; every selector action gets a fresh uniqueness probe. There remains a race between accessibility observation and native dispatch: this is not an atomic UI transaction. Verify meaningful application outcomes afterwards.

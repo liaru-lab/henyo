@@ -1,5 +1,9 @@
 # Opt-in Hexagon execution and readiness checks
 
+For the complete source patch and owned worker adapter that combine the
+subsequent validated improvements, use [Native runtime integration](NATIVE.md).
+The paired-only patch below remains a separate historical experiment.
+
 This retains two experimental improvements outside the APK and production
 control loop. They can be evaluated separately: a native Hexagon patch for
 paired Gate/Up matrix multiplication with SwiGLU, and deterministic necessary
