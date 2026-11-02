@@ -314,6 +314,8 @@ tasks.register("verifyD1WorkerPolicy", Exec) {
     inputs.file("scripts/verify-d1-worker-policy.py")
     inputs.file("src/main/java/link/liaru/henyo/D1WorkerPolicy.java")
     inputs.file("src/test/java/link/liaru/henyo/D1WorkerPolicyTest.java")
+    inputs.file("src/main/java/link/liaru/henyo/D1BackendPolicy.java")
+    inputs.file("src/test/java/link/liaru/henyo/D1BackendPolicyTest.java")
     commandLine "python", "scripts/verify-d1-worker-policy.py"
 }
 

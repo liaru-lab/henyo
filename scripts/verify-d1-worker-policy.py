@@ -10,5 +10,8 @@ evidence.mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="d1-policy-", dir=evidence) as directory:
     subprocess.run(["javac", "--release", "11", "-d", directory,
                     str(root / "src/main/java/link/liaru/henyo/D1WorkerPolicy.java"),
-                    str(root / "src/test/java/link/liaru/henyo/D1WorkerPolicyTest.java")], check=True)
+                    str(root / "src/test/java/link/liaru/henyo/D1WorkerPolicyTest.java"),
+                    str(root / "src/main/java/link/liaru/henyo/D1BackendPolicy.java"),
+                    str(root / "src/test/java/link/liaru/henyo/D1BackendPolicyTest.java")], check=True)
     subprocess.run(["java", "-cp", directory, "link.liaru.henyo.D1WorkerPolicyTest"], check=True)
+    subprocess.run(["java", "-cp", directory, "link.liaru.henyo.D1BackendPolicyTest"], check=True)

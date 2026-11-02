@@ -16,6 +16,16 @@ one worker across decisions; idle workers are released and can be prepared again
 from settings. Global Stop also releases the worker. Resume does not replay a
 plan or restart a pending decision.
 
+An internal test APK can additionally package a matched Hexagon v81 DSP library
+using `scripts/prepare-d1-android.py --v81-dsp FILE --v81-sha256 SHA` alongside
+the normal bundle/source/output arguments. This uses the conservative v81
+profile: DMA64 and the additional graph/fusion/shape tuning are disabled.
+The v79 profile is unchanged. Both profiles require actual accelerator discovery,
+the matching manifest-verified DSP library, and all 25 layers placed on the NPU;
+unknown architectures remain unavailable. This test path is not a claim of
+public-release support or GPU fallback. Cross-device probability agreement is
+not a ground-truth accuracy evaluation.
+
 ## Discover and evaluate
 
 ```sh
