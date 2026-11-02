@@ -64,8 +64,13 @@ Official APKs are signed locally with the long-lived Henyo release key. The
 key and its credentials stay under `~/.config/henyo/signing/` and are never
 stored in Git or GitHub Actions.
 
+Prepare the pinned native bundle as described in
+[On-device assistance](docs/on-device-assistance.md#native-build-and-measurement).
+Official releases include this optional runtime; model weights are downloaded
+only by users who choose to enable assistance.
+
 ```sh
-scripts/build-release.sh 0.1.0 1
+HENYO_D1_ANDROID_RUNTIME=ABSOLUTE_ANDROID_RUNTIME scripts/build-release.sh VERSION CODE
 ```
 
 The script runs the checks, verifies the application ID and pinned signing
@@ -621,6 +626,16 @@ Android settings, user or ADB recovery is still required.
 
 ## Codex Skill
 
+Optional [on-device assistance](docs/on-device-assistance.md) adds local d1
+semantic checks to agent-defined fragments. It is off by default, needs a
+separate model download and a supported accelerator, and leaves existing
+control available when disabled or unavailable.
+
+In **Message appearance**, **Message background opacity** adjusts only the
+panel background, border and shadow. Its live preview supports light/dark
+sample content. The 50% default, 0–100% slider and reset apply to messages,
+plans and completion notifications without fading their text.
+
 The Codex skill/runbook for using Henyo is stored at:
 
 ```text
@@ -646,6 +661,10 @@ service off/on if `/ui/tree` returns `{"ok":false,"error":"no_root"}`.
 ## License
 
 Copyright 2026 liaru. Licensed under the [Apache License 2.0](LICENSE).
+
+The native runtime retains its third-party notices in APK assets under
+`d1-notices`. The separately downloaded d1 model uses the upstream
+[LiquidAI model license](https://huggingface.co/LiquidAI/d1-2B).
 
 
 Control-loop timing methodology, bounded phase metrics, and local measured

@@ -8,7 +8,19 @@ import java.util.List;
 final class ConditionalWorkflow {
     static final int MAX_STEPS = 16, MAX_DEPTH = 2, MAX_BUDGET_MS = 5000, MAX_WAIT_MS = 2000;
     enum Presence { PRESENT, ABSENT, UNKNOWN }
-    enum Kind { ACTION, BRANCH, WAIT, REQUIRE }
+    enum Kind { ACTION, BRANCH, WAIT, REQUIRE, SEMANTIC }
+    static final class SemanticCondition {
+        final Selector candidate; final String question;
+        SemanticCondition(Selector candidate,String question) {
+            if(candidate==null||question==null||question.trim().isEmpty()||question.codePointCount(0,question.length())>512)
+                throw new IllegalArgumentException("invalid semantic condition");
+            this.candidate=candidate;this.question=question.trim();
+        }
+    }
+    static final class SemanticResult {
+        final boolean accepted;final String fingerprint,code;
+        SemanticResult(boolean accepted,String fingerprint,String code){this.accepted=accepted;this.fingerprint=fingerprint;this.code=safeCode(code);}
+    }
     static final class Target {
         final String packageName; final int windowId, displayId;
         Target(String packageName, int windowId, int displayId) {
@@ -38,6 +50,7 @@ final class ConditionalWorkflow {
     static final class Step {
         final Kind kind; final Selector selector; final Action action; final int timeoutMs;
         final List<Step> yes, no;
+        SemanticCondition semantic;
         private Step(Kind kind, Selector selector, Action action, int timeoutMs, List<Step> yes, List<Step> no) {
             this.kind=kind; this.selector=selector; this.action=action; this.timeoutMs=timeoutMs;
             this.yes=copy(yes); this.no=copy(no);
@@ -49,6 +62,10 @@ final class ConditionalWorkflow {
             return new Step(Kind.WAIT,selector,null,timeout,null,null);
         }
         static Step require(Selector selector) { if(selector==null)throw new IllegalArgumentException();return new Step(Kind.REQUIRE,selector,null,0,null,null); }
+        static Step semantic(SemanticCondition condition) {
+            if(condition==null)throw new IllegalArgumentException();
+            Step step=new Step(Kind.SEMANTIC,condition.candidate,null,0,null,null);step.semantic=condition;return step;
+        }
     }
     static final class Plan {
         final Target target; final List<Step> steps; final Selector verify; final int budgetMs;
@@ -79,6 +96,10 @@ final class ConditionalWorkflow {
         ActionResult act(Target target,Action action);
         long nowMs();
         void pause(long millis) throws InterruptedException;
+        default SemanticResult semantic(Target target,SemanticCondition condition) {
+            return new SemanticResult(false,"","assistance_unavailable");
+        }
+        default boolean semanticCurrent(Target target,SemanticCondition condition,String fingerprint) {return false;}
     }
     static final class Event {
         final int index; final String kind, state, code;
@@ -108,6 +129,11 @@ final class ConditionalWorkflow {
     private static final class Guard {final Selector selector;final Presence expected;Guard(Selector selector,Presence expected){this.selector=selector;this.expected=expected;}}
     private final Plan plan;private final Adapter adapter;private final List<Event> events=new ArrayList<>();
     private final List<Guard> guards=new ArrayList<>();
+    private final List<SemanticGuard> semanticGuards=new ArrayList<>();
+    private static final class SemanticGuard {
+        final SemanticCondition condition;final String fingerprint;
+        SemanticGuard(SemanticCondition condition,String fingerprint){this.condition=condition;this.fingerprint=fingerprint;}
+    }
     private int visited,accepted;private boolean effectsPossible,attemptingAction;private String currentKind="verify";private long started;
     ConditionalWorkflow(Plan plan,Adapter adapter){this.plan=plan;this.adapter=adapter;}
     Result run() {
@@ -135,6 +161,12 @@ final class ConditionalWorkflow {
                 case REQUIRE:
                     if(probe(step.selector)!=Presence.PRESENT)throw new Halt("needs_agent","workflow_needs_agent");
                     record("present","");break;
+                case SEMANTIC:
+                    if(probe(step.selector)!=Presence.PRESENT)throw new Halt("needs_agent","workflow_needs_agent");
+                    SemanticResult semantic=adapter.semantic(plan.target,step.semantic);check();
+                    if(!semantic.accepted)throw new Halt("needs_agent",semantic.code.isEmpty()?"workflow_semantic_uncertain":semantic.code);
+                    if(semantic.fingerprint==null||semantic.fingerprint.isEmpty())throw new Halt("needs_agent","workflow_semantic_changed");
+                    semanticGuards.add(new SemanticGuard(step.semantic,semantic.fingerprint));record("matched","");break;
                 case WAIT:
                     long began=adapter.nowMs();
                     while(true) {
@@ -146,6 +178,9 @@ final class ConditionalWorkflow {
                     }
                     break;
                 case ACTION:
+                    for(SemanticGuard semanticGuard:semanticGuards)
+                        if(!adapter.semanticCurrent(plan.target,semanticGuard.condition,semanticGuard.fingerprint))
+                            throw new Halt("needs_agent","workflow_semantic_changed");
                     for(Guard activeGuard:guards)if(probe(activeGuard.selector)!=activeGuard.expected)
                         throw new Halt("needs_agent","workflow_needs_agent");
                     if(step.action.selector!=null&&probe(step.action.selector)!=Presence.PRESENT)
@@ -153,7 +188,7 @@ final class ConditionalWorkflow {
                     check();attemptingAction=true;ActionResult result=adapter.act(plan.target,step.action);attemptingAction=false;
                     effectsPossible|=result.ok||result.effectsPossible;
                     if(!result.ok)throw new Halt(stateFor(result.code),result.code);
-                    accepted++;guards.clear();record("accepted","");check();break;
+                    accepted++;guards.clear();semanticGuards.clear();record("accepted","");check();break;
             }
         }
     }
@@ -164,9 +199,10 @@ final class ConditionalWorkflow {
         events.add(new Event(visited,currentKind,state,code));
     }
     private static String stateFor(String code){
+        if(code!=null&&code.startsWith("assistance_"))return "needs_agent";
         if("deadline_exceeded".equals(code))return "deadline_exceeded";
         if("control_stopped".equals(code)||"control_owned".equals(code)||"auth_revoked".equals(code)||"auth_invalid".equals(code))return "stopped";
-        if("workflow_target_changed".equals(code)||"stale_target".equals(code)||"tree_unavailable".equals(code)
+        if("workflow_target_changed".equals(code)||"workflow_semantic_changed".equals(code)||"stale_target".equals(code)||"tree_unavailable".equals(code)
                 ||"sensitive_ui_permission_required".equals(code)||"control_permission_required".equals(code))return "needs_agent";
         return "failed";
     }

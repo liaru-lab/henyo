@@ -1,5 +1,9 @@
 # d1-2B on-device evaluation
 
+For the shipped optional APK feature, see
+[On-device assistance](../../docs/on-device-assistance.md). The CPU/OpenCL
+measurements below describe the earlier standalone experiments.
+
 For the consolidated opt-in NPU execution candidate, see
 [Native runtime integration](NATIVE.md). The earlier paired-kernel experiment
 and necessary-condition checks are described in

@@ -1,9 +1,10 @@
 # Consolidated native d1 runtime
 
-This is the opt-in integration candidate for the optimized d1 execution path.
-It provides one source patch, a matched base/host/DSP bundle and an owned worker
-adapter. It remains outside the APK; application control must explicitly call
-the adapter. No model-driven action is enabled by assembling or starting it.
+This builds the optimized d1 execution path from one source patch and a matched
+base/host/DSP bundle. The standalone Python worker adapter remains useful for
+comparison. The APK uses the same native components through the optional
+[on-device assistance feature](../../docs/on-device-assistance.md); assembling
+or starting this standalone adapter does not enable Android control.
 
 The supported combination is llama.cpp
 `8642541b255bfb5dc39cd351a178be09013a55d6`, the pinned d1-2B Q4_K_M model in

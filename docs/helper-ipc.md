@@ -518,3 +518,9 @@ Use `completion.show` or `progress.finish` to complete the started task.
 
 
 `henyo workflow run FILE` sends a single experimental `workflow.run` call with a helper task ID. See [Conditional workflows](conditional-workflows.md). Preserve partial error results; never replay the whole plan automatically.
+
+`henyo assistance status`, `henyo assistance prepare` and
+`henyo assistance evaluate FILE` use the normal
+WS helper path for optional local inference. See [On-device assistance](on-device-assistance.md).
+They cannot enable the user setting or download a model. Evaluation does not
+dispatch an input operation and does not replace fresh target validation.

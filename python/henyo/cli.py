@@ -957,6 +957,9 @@ def usage() -> None:
   henyo helper reload-auth
   henyo cache tree|clear
   henyo workflow run FILE
+  henyo assistance status
+  henyo assistance prepare
+  henyo assistance evaluate FILE
   henyo task start
   henyo progress set --goal TEXT [--step STATUS TEXT ...] [--replan]
   henyo progress set [--goal TEXT] [--completed TEXT ...] [--current TEXT]
@@ -1013,6 +1016,20 @@ def main(argv=None) -> int:
         if not isinstance(plan, dict):
             raise SystemExit("workflow plan must be a JSON object")
         return print_json(helper_request({"cmd":"call", "op":"workflow.run", "params":plan}))
+    if cmd == "assistance":
+        if rest == ["status"]:
+            return print_json(helper_request({"cmd":"call", "op":"assistance.status", "params":{}}))
+        if rest == ["prepare"]:
+            return print_json(helper_request({"cmd":"call", "op":"assistance.prepare", "params":{}}))
+        if len(rest) == 2 and rest[0] == "evaluate":
+            raw = Path(rest[1]).read_bytes()
+            if len(raw) > 32768:
+                raise SystemExit("assistance request exceeds 32768 bytes")
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise SystemExit("assistance request must be a JSON object")
+            return print_json(helper_request({"cmd":"call", "op":"assistance.evaluate", "params":body}))
+        usage(); return 2
     if cmd == "task":
         if rest != ["start"]:
             usage(); return 2

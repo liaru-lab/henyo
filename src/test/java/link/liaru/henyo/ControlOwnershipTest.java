@@ -50,6 +50,28 @@ public final class ControlOwnershipTest {
         if (dispatched[0] != 1) throw new AssertionError("dispatch after stop");
         ControlOwnership persisted = new ControlOwnership(true);
         denied(() -> persisted.check(persisted.ticket(), "reconnected"), "control_stopped");
+        // A native self-action can wait for the app's UI thread. Presentation
+        // reads on that thread must not wait for the dispatch monitor in turn.
+        ControlOwnership self = new ControlOwnership(false);
+        CountDownLatch inDispatch = new CountDownLatch(1), uiRead = new CountDownLatch(1);
+        AtomicReference<Throwable> selfFailure = new AtomicReference<>();
+        long selfTicket = self.ticket();
+        Thread dispatchThread = new Thread(() -> {
+            try {
+                self.dispatch(selfTicket, "self", () -> {
+                    inDispatch.countDown();
+                    try { if (!uiRead.await(1, TimeUnit.SECONDS)) throw new AssertionError("UI snapshot blocked behind native dispatch"); }
+                    catch (InterruptedException interrupted) { throw new AssertionError(interrupted); }
+                    return true;
+                });
+            } catch (Throwable failureDuringDispatch) { selfFailure.set(failureDuringDispatch); }
+        });
+        dispatchThread.start();
+        if (!inDispatch.await(1, TimeUnit.SECONDS)) throw new AssertionError("dispatch never entered");
+        if (self.stopped() || !"active".equals(self.state()) || !"self".equals(self.owner()))
+            throw new AssertionError("UI snapshot is invalid");
+        uiRead.countDown();dispatchThread.join(2000);
+        if(dispatchThread.isAlive()||selfFailure.get()!=null)throw new AssertionError("self-action UI reads",selfFailure.get());
         System.out.println("ControlOwnershipTest passed");
     }
 

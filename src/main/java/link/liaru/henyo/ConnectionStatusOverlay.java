@@ -105,6 +105,15 @@ final class ConnectionStatusOverlay {
         mainHandler.post(() -> setConnectedOnMain(value));
     }
 
+    void setMessageBackgroundOpacity(int value) {
+        mainHandler.post(() -> {
+            if (!destroyed && activityView != null) {
+                activityView.panelOpacity = MessagePanelStyle.clamp(value);
+                activityView.invalidate();
+            }
+        });
+    }
+
     void setObservationMode(ObservationEffectModel.Mode mode) {
         Runnable update = () -> {
             if (destroyed) return;
@@ -1044,7 +1053,8 @@ final class ConnectionStatusOverlay {
     private static final class ActivityView extends View {
         private static final int TEXT_FILL = Color.rgb(242, 244, 247);
         private static final int TEXT_GLOW = Color.rgb(0, 241, 239);
-        private static final int PANEL_FILL = Color.rgb(27, 30, 35);
+        private final MessagePanelPainter messagePanelPainter = new MessagePanelPainter();
+        private int panelOpacity;
         private static final long CAPTION_FRAME_MS = 32L;
 
         private final AgentActivityModel model;
@@ -1055,9 +1065,6 @@ final class ConnectionStatusOverlay {
         private final Runnable emptyCallback;
         private final PerformanceMetrics performanceMetrics;
         private final TextPaint renderPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-        private final Paint activityShadePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint panelBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF activityPanelRect = new RectF();
         private final ActivityPanelLayout panelLayout = new ActivityPanelLayout();
         private final int[] captionHeights = new int[AgentActivityModel.MAX_MESSAGES];
         private final float progressRowHeightPx;
@@ -1111,6 +1118,7 @@ final class ConnectionStatusOverlay {
                 TargetVisualState targetVisualState, Runnable emptyCallback,
                 PerformanceMetrics performanceMetrics) {
             super(context);
+            panelOpacity = HenyoAccessibilityService.messageBackgroundOpacity(context);
             this.model = model;
             this.progressModel = progressModel;
             this.completionModel = completionModel;
@@ -1143,9 +1151,6 @@ final class ConnectionStatusOverlay {
             caretSlotWidthPx = Math.max(1, Math.round(caretWidthPx + 2f * density));
             caretPaint.setStyle(Paint.Style.FILL);
             caretPaint.setColor(TEXT_FILL);
-            activityShadePaint.setStyle(Paint.Style.FILL);
-            panelBorderPaint.setStyle(Paint.Style.STROKE);
-            panelBorderPaint.setStrokeWidth(Math.max(1f, 0.7f * density));
             scanGlowPaint.setStyle(Paint.Style.FILL);
             scanCorePaint.setStrokeWidth(Math.max(1.5f, 2f * density));
             scanCorePaint.setStrokeCap(Paint.Cap.ROUND);
@@ -1440,20 +1445,10 @@ final class ConnectionStatusOverlay {
             else animatedPanelTop += (targetTop - animatedPanelTop)
                     * Math.min(1f, Math.max(0L, now - panelDrawAtMs) / 120f);
             panelDrawAtMs = now;
-            float radius = 18f * density;
             float left = 12f * density;
             float right = left + panelWidth;
-            activityPanelRect.set(left, animatedPanelTop + 3f * density, right, panelLayout.bottom + 3f * density);
-            activityShadePaint.setColor(Color.BLACK);
-            activityShadePaint.setAlpha(Math.round(22f * rowAlpha));
-            canvas.drawRoundRect(activityPanelRect, radius, radius, activityShadePaint);
-            activityPanelRect.set(left, animatedPanelTop, right, panelLayout.bottom);
-            activityShadePaint.setColor(PANEL_FILL);
-            activityShadePaint.setAlpha(Math.round(240f * rowAlpha));
-            canvas.drawRoundRect(activityPanelRect, radius, radius, activityShadePaint);
-            panelBorderPaint.setColor(Color.WHITE);
-            panelBorderPaint.setAlpha(Math.round(30f * rowAlpha));
-            canvas.drawRoundRect(activityPanelRect, radius, radius, panelBorderPaint);
+            messagePanelPainter.draw(canvas, left, animatedPanelTop, right,
+                    panelLayout.bottom, density, panelOpacity, rowAlpha);
         }
 
         private void drawObservationScan(Canvas canvas, int width, int height, long now,

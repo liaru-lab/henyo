@@ -2,16 +2,18 @@ package link.liaru.henyo;
 
 /** Process-local ownership; tickets invalidate work accepted before a user stop. */
 final class ControlOwnership {
-    private boolean stopped;
+    private volatile boolean stopped;
     private long generation;
-    private String owner = "";
+    private volatile String owner = "";
 
     ControlOwnership(boolean stopped) { this.stopped = stopped; }
 
     synchronized long ticket() { return generation; }
-    synchronized boolean stopped() { return stopped; }
-    synchronized String owner() { return owner; }
-    synchronized String state() { return stopped ? "stopped" : owner.isEmpty() ? "available" : "active"; }
+    // Presentation reads must not wait for a Binder action dispatched to this
+    // app's main thread. Authorization still uses the synchronized methods below.
+    boolean stopped() { return stopped; }
+    String owner() { return owner; }
+    String state() { return stopped ? "stopped" : owner.isEmpty() ? "available" : "active"; }
 
     synchronized boolean isCurrent(long ticket, String candidate) {
         return !stopped && ticket == generation && (owner.isEmpty() || owner.equals(candidate));

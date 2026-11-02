@@ -56,6 +56,7 @@ KNOWN_CAPABILITY_FEATURES = frozenset({
     "displayCapture",
     "screenshotCoordinates",
     "windowCapture",
+    "onDeviceAssistance",
 })
 KNOWN_CAPABILITY_LIMITS = frozenset({
     "inboundFrameBytes",
@@ -66,7 +67,7 @@ KNOWN_CAPABILITY_LIMITS = frozenset({
     "timeoutMs",
 })
 KNOWN_CAPABILITY_OPERATIONS = frozenset({
-    "workflow.run",
+    "workflow.run", "assistance.status", "assistance.prepare", "assistance.evaluate",
     "ui.tree", "ui.find", "ui.click", "ui.setText", "ui.tap", "ui.swipe",
     "ui.scroll", "ui.scrollUntil", "ui.wait", "ui.observe",
     "app.current", "app.list", "app.launch", "app.openUri", "app.start", "app.activate",

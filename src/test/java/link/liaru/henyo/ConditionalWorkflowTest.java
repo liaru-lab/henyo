@@ -91,7 +91,31 @@ public final class ConditionalWorkflowTest {
         ConditionalWorkflow.Step nested=ConditionalWorkflow.Step.require(SEARCH);
         for(int i=0;i<3;i++)nested=ConditionalWorkflow.Step.branch(SEARCH,Collections.singletonList(nested),Collections.emptyList());
         try{plan(Collections.singletonList(nested),DONE,5000);throw new AssertionError("deep branches accepted");}catch(IllegalArgumentException expected){}
-        probeTests();System.out.println("ConditionalWorkflowTest passed");
+        semanticTests();probeTests();System.out.println("ConditionalWorkflowTest passed");
+    }
+    static void semanticTests() {
+        class SemanticFake extends Fake {
+            boolean enabled=true,accepted=true,changed;long inferenceMs=150;
+            public ConditionalWorkflow.SemanticResult semantic(ConditionalWorkflow.Target target,ConditionalWorkflow.SemanticCondition condition) {
+                clock+=inferenceMs;
+                return new ConditionalWorkflow.SemanticResult(enabled&&accepted,"selected row",!enabled?"assistance_disabled":"workflow_semantic_uncertain");
+            }
+            public boolean semanticCurrent(ConditionalWorkflow.Target target,ConditionalWorkflow.SemanticCondition condition,String fingerprint) {
+                return enabled&&!changed&&"selected row".equals(fingerprint);
+            }
+        }
+        ConditionalWorkflow.Step semantic=ConditionalWorkflow.Step.semantic(new ConditionalWorkflow.SemanticCondition(RESULT,"Does this result name the requested app?"));
+        List<ConditionalWorkflow.Step> steps=Arrays.asList(click(SEARCH),ConditionalWorkflow.Step.waitFor(RESULT,1000),semantic,click(RESULT));
+        SemanticFake fake=new SemanticFake();ConditionalWorkflow.Result result=new ConditionalWorkflow(plan(steps,DONE,5000),fake).run();
+        check(result.completed()&&fake.dispatches==2,"semantic match permits the next explicitly planned action with final verification");
+        fake=new SemanticFake();fake.enabled=false;result=new ConditionalWorkflow(plan(steps,DONE,5000),fake).run();
+        check(result.state.equals("needs_agent")&&result.code.equals("assistance_disabled")&&result.actionsAccepted==1&&fake.dispatches==1,"disabled assistance retains partial effects and never clicks the result");
+        fake=new SemanticFake();fake.accepted=false;result=new ConditionalWorkflow(plan(steps,DONE,5000),fake).run();
+        check(result.code.equals("workflow_semantic_uncertain")&&fake.dispatches==1,"uncertain model result is not actionable");
+        fake=new SemanticFake();fake.changed=true;result=new ConditionalWorkflow(plan(steps,DONE,5000),fake).run();
+        check(result.code.equals("workflow_semantic_changed")&&fake.dispatches==1,"changed semantic context invalidates the answer before mutation");
+        fake=new SemanticFake();fake.inferenceMs=5000;result=new ConditionalWorkflow(plan(steps,DONE,5000),fake).run();
+        check(result.state.equals("deadline_exceeded")&&fake.dispatches==1,"late semantic result cannot bypass the workflow deadline");
     }
     static class Node{boolean match,fail;List<Node>children=new ArrayList<>();int reported=-1;}
     static class Access implements WorkflowPredicateProbe.Access<Node>{

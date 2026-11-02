@@ -286,6 +286,7 @@ tasks.register("verifyHelperTreeOptions", Exec) {
 }
 
 tasks.register("check") {
+    dependsOn "verifyD1WorkerPolicy", "verifySessionOperationQueue"
     dependsOn "verifyConditionalWorkflow"
     dependsOn "verifyTargetAccess"
     dependsOn "verifyControlLatency", "verifyGestureGuard", "verifyPerformanceMetrics"
@@ -302,6 +303,20 @@ tasks.register("check") {
     dependsOn "verifyAgentActivityModel"
     dependsOn "verifyHelperTreeOptions"
     dependsOn "verifyPairingTotp", "verifyWebSocketProtocol", "verifyWebSocketSessionPolicy", "verifyTermuxCommandBridge", "verifyConnectivityWatchdog", "verifyScreenshotCoordinateMapper", "verifyWindowTargetResolver", "verifyWindowClientContract", "verifyCursorMotionEasing", "verifyTaskProgressModel", "verifyTaskProgressContract", "verifyTaskProgressHelper", "verifyHelperSessionStatus", "verifyCompletionSummary", "verifyResponseSemantics", "verifyOpenUriContract", "verifySafeDeploy", "verifySkillCheckoutDiscovery", "verifySensitiveUiAccess"
+}
+
+tasks.register("verifyD1WorkerPolicy", Exec) {
+    inputs.file("scripts/verify-d1-worker-policy.py")
+    inputs.file("src/main/java/link/liaru/henyo/D1WorkerPolicy.java")
+    inputs.file("src/test/java/link/liaru/henyo/D1WorkerPolicyTest.java")
+    commandLine "python", "scripts/verify-d1-worker-policy.py"
+}
+
+tasks.register("verifySessionOperationQueue", Exec) {
+    inputs.file("scripts/verify-session-operation-queue.py")
+    inputs.file("src/main/java/link/liaru/henyo/SessionOperationQueue.java")
+    inputs.file("src/test/java/link/liaru/henyo/SessionOperationQueueTest.java")
+    commandLine "python", "scripts/verify-session-operation-queue.py"
 }
 
 tasks.register("verifyOperationOutcomes", Exec) {
@@ -371,9 +386,18 @@ tasks.register("packageUnsigned", Exec) {
     dependsOn "dex"
     inputs.file(linkedApk)
     inputs.file("${dexDir.absolutePath}/classes.dex")
+    def d1Bundle = System.getenv("HENYO_D1_ANDROID_RUNTIME")
+    inputs.property("d1Runtime", d1Bundle ?: "unavailable")
+    if (d1Bundle) inputs.dir(file(d1Bundle))
     outputs.file(unsignedApk)
     doFirst {
         Files.copy(linkedApk.toPath(), unsignedApk.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        if (d1Bundle) {
+            providers.exec {
+                workingDir file(d1Bundle)
+                commandLine "zip", "-q", "-r", unsignedApk.absolutePath, "lib", "assets"
+            }.result.get().assertNormalExitValue()
+        }
     }
     commandLine "sh", "-c", "cd ${dexDir.absolutePath} && zip -q ${unsignedApk.absolutePath} classes.dex"
 }
