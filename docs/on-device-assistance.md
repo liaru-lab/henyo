@@ -149,7 +149,10 @@ HENYO_D1_ANDROID_RUNTIME=ABSOLUTE_ANDROID_RUNTIME scripts/build-release.sh VERSI
 The packager builds the actual upstream CPU/dynamic backend registry, excludes
 unused OpenCL/RPC/stock-Hexagon registration dependencies, adjusts runpaths on
 fresh copies and strips debug information. The optimized graph/host/DSP kernels
-are retained. Model weights and SDK inputs remain outside Git. Licenses and the
+are retained. Build all native components with compiler file-prefix maps before
+linking and DSP integrity-metadata generation. Packaging rejects remaining
+checkout/source-root references instead of rewriting linked libraries. Model weights
+and SDK inputs remain outside Git. Licenses and the
 native manifest are included in APK assets. Without an explicit runtime bundle,
 contributor builds retain the normal bridge and report assistance unavailable;
 the public release entrypoint requires the prepared runtime.

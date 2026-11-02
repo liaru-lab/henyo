@@ -53,6 +53,31 @@ externally supplied x86 tool wrapper and QAIC wrapper can be selected through
 `HEXAGON_COMPILER_WRAPPER_DIR` and `HEXAGON_QAIC_ROOT`. This repository does not
 provide those wrappers or promise that the SDK runs natively on arm64.
 
+For distributed runtime builds, also set `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS`
+to compiler `-ffile-prefix-map=ABSOLUTE_ROOT=/src/NEUTRAL_NAME` mappings for
+the source, build/generated and SDK directories in both CMake configurations
+above. The host builder and APK registry/launcher builder add their mappings
+directly. Apply these flags before compilation and linking. Remove any non-load
+linker-command metadata before final DSP SWIV generation, then preserve that
+finalized DSP unchanged during APK packaging. Packaging rejects remaining checkout
+or source-root references. Verify diagnostic strings for all build roots before
+distribution; stripping debug information alone does not remove `__FILE__`.
+
+The pinned CMake target already adds SWIV. If the linker records local commands
+in non-load `.comment`, remove that section and the existing unnamed SWIV
+section with standard ELF tooling, then run the pinned generator last:
+
+```sh
+llvm-objcopy --remove-section=.comment --remove-section= \
+  artifacts/d1-dsp/libggml-htp-v79.so artifacts/d1-dsp/without-command.so
+python PATCHED_SOURCE/ggml/src/ggml-hexagon/htp/htp-swiv.py \
+  -i artifacts/d1-dsp/without-command.so -o artifacts/d1-dsp/libggml-htp-v79.so
+```
+
+Independently verify SWIV CRC, dynamic ABI, unchanged load layout/code/data and
+absence of all mapped roots before assembling the bundle. Never distribute a
+DSP whose integrity metadata predates stripping or other ELF changes.
+
 The base build uses the Android toolchain's shared C++ runtime. This differs
 from the official base binary's embedded runtime. Bundle the matching
 `libc++_shared.so` with its license. The worker requires that exact runtime
