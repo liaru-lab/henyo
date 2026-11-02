@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from native_diagnostic_paths import verify_no_build_paths
 
 
 def sha(path):
@@ -66,6 +67,7 @@ def main():
     # This removes references to unused OpenCL/RPC/stock-Hexagon registration;
     # it does not substitute fake backend functions.
     command = ['clang++', '-shared', '-fPIC', '-O3', '-DNDEBUG', '-std=c++17',
+               '-ffile-prefix-map=' + str(source_root) + '=/src/llama.cpp',
                '-fvisibility=hidden', '-DGGML_BACKEND_DL', '-DGGML_BUILD',
                '-DGGML_SHARED', '-DGGML_USE_CPU', '-D_GNU_SOURCE',
                '-I', str(source_root / 'ggml/include'),
@@ -79,6 +81,7 @@ def main():
     # owning app, including when Android terminates the VM without onDestroy.
     launcher = root / 'src/main/native/d1-main.cpp'
     command = ['clang++', '-O2', '-fPIE', '-pie', str(launcher), '-L', str(native),
+               '-ffile-prefix-map=' + str(root) + '=/src/henyo',
                '-l:libllama-server-impl.so', '-Wl,--allow-shlib-undefined',
                '-o', str(native / 'libhenyo-d1.so')]
     (output / 'launcher-build.json').write_text(json.dumps(command, indent=2))
@@ -91,6 +94,7 @@ def main():
                 subprocess.run(['patchelf', '--remove-needed', dependency, str(path)], check=True)
             subprocess.run(['patchelf', '--set-rpath', '$ORIGIN', str(path)], check=True)
             subprocess.run(['llvm-strip', '--strip-debug', str(path)], check=True)
+        verify_no_build_paths(path.read_bytes(), [source_root, root])
         path.chmod(0o755)
     marker = root / 'src/main/native/d1-unavailable.c'
     for abi, target in [('armeabi-v7a', 'armv7a-linux-androideabi26'),

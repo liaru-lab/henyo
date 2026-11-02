@@ -38,6 +38,8 @@ def build(source, sdk, generated, base_lib, output, jobs=2):
         command = ["clang++" if path.suffix == ".cpp" else "clang", "-O2", "-fPIC",
                    "-fvisibility=hidden", "-DGGML_BACKEND_BUILD", "-DGGML_BACKEND_SHARED",
                    "-DGGML_BACKEND_DL", "-DNDEBUG"]
+        for directory, label in [(source, "llama.cpp"), (sdk, "sdk"), (generated, "generated")]:
+            command.append("-ffile-prefix-map=" + str(directory) + "=/src/" + label)
         if path.suffix == ".cpp":
             command.append("-std=c++17")
         for directory in includes:
