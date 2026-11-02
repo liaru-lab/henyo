@@ -1086,6 +1086,7 @@ final class ConnectionStatusOverlay {
         private final RectF gloveRect = new RectF();
         private final RectF gloveGlowRect = new RectF();
         private final float[] gloveWrist = new float[2];
+        private final float[] gloveTrailWrist = new float[2];
         private final TargetVisualState targetVisualState;
         private final Bitmap pointGloveBitmap;
         private final Bitmap swipeGloveBitmap;
@@ -1523,6 +1524,7 @@ final class ConnectionStatusOverlay {
             if (frame == null) return;
             visualCoordinates.wristAt(now, gloveWrist);
             int alpha = Math.max(0, Math.min(255, Math.round(frame.alpha * 255f)));
+            drawGloveMotionTrail(canvas, now, frame.pose, alpha);
             drawGloveBitmap(canvas, frame.pose, gloveWrist[0], gloveWrist[1], alpha);
 
             if (frame.pose == AgentVisualModel.GLOVE_POSE_POINT && frame.actionAmount > 0f) {
@@ -1533,7 +1535,39 @@ final class ConnectionStatusOverlay {
             }
         }
 
+        private void drawGloveMotionTrail(Canvas canvas, long now, int pose, int alpha) {
+            if (!visualCoordinates.isAnimating(now)) return;
+            // Sample only the current motion segment, so pose changes and new
+            // sessions never inherit an old hand image. No frame history is retained.
+            long segmentStart = now < visualCoordinates.actionStartedAtMs
+                    ? visualCoordinates.travelStartedAtMs : visualCoordinates.actionStartedAtMs;
+            long probeTime = Math.max(segmentStart, now - 6L);
+            if (probeTime >= now) return;
+            visualCoordinates.wristAt(probeTime, gloveTrailWrist);
+            float speed = (float) Math.hypot(gloveWrist[0] - gloveTrailWrist[0],
+                    gloveWrist[1] - gloveTrailWrist[1]) / ((now - probeTime) * density);
+            float strength = Math.min(1f, Math.max(0f, (speed - 0.08f) / 1.2f));
+            if (strength <= 0f) return;
+            for (int sample = 6; sample >= 1; sample--) {
+                long sampleTime = Math.max(segmentStart, now - sample * 4L);
+                visualCoordinates.wristAt(sampleTime, gloveTrailWrist);
+                float dx = gloveTrailWrist[0] - gloveWrist[0];
+                float dy = gloveTrailWrist[1] - gloveWrist[1];
+                float distance = (float) Math.hypot(dx, dy);
+                if (distance < 0.5f * density) continue;
+                float scale = Math.min(1f, 24f * density / distance);
+                int trailAlpha = Math.round(alpha * strength * 0.13f * (1f - sample / 7f));
+                drawGloveBitmap(canvas, pose, gloveWrist[0] + dx * scale,
+                        gloveWrist[1] + dy * scale, trailAlpha, false);
+            }
+        }
+
         private void drawGloveBitmap(Canvas canvas, int pose, float wristX, float wristY, int alpha) {
+            drawGloveBitmap(canvas, pose, wristX, wristY, alpha, true);
+        }
+
+        private void drawGloveBitmap(Canvas canvas, int pose, float wristX, float wristY,
+                int alpha, boolean glow) {
             if (alpha <= 0) return;
             Bitmap bitmap = pose == AgentVisualModel.GLOVE_POSE_OPEN_PALM
                     ? swipeGloveBitmap
@@ -1550,7 +1584,7 @@ final class ConnectionStatusOverlay {
                     gloveRect.right + glowOutset, gloveRect.bottom + glowOutset);
             gloveGlowPaint.setAlpha(Math.round(alpha * 0.22f));
             gloveBitmapPaint.setAlpha(alpha);
-            canvas.drawBitmap(bitmap, null, gloveGlowRect, gloveGlowPaint);
+            if (glow) canvas.drawBitmap(bitmap, null, gloveGlowRect, gloveGlowPaint);
             canvas.drawBitmap(bitmap, null, gloveRect, gloveBitmapPaint);
         }
 
