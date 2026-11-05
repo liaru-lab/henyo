@@ -541,6 +541,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OkResponse"
+        "400":
+          description: Conflicting selector/focus mode or invalid focused value (invalid_input_target).
+        "404":
+          description: No selector match (not_found) or no focused editable control (no_focused_editable).
+        "409":
+          description: Matching node has no editable control (not_editable), multiple controls resolve (ambiguous_target), or ACTION_SET_TEXT was rejected (set_text_rejected).
+        "503":
+          description: Incomplete or unavailable accessibility tree (tree_unavailable).
         "401":
           $ref: "#/components/responses/AuthError"
         "403":
@@ -888,6 +896,11 @@ components:
         - deadline_exceeded
         - tree_unavailable
         - invalid_selector
+        - invalid_input_target
+        - no_focused_editable
+        - not_editable
+        - ambiguous_target
+        - set_text_rejected
         - stale_target
         - control_stopped
         - control_owned
@@ -1359,11 +1372,32 @@ components:
           type: string
     SetTextRequest:
       type: object
-      description: An explicit selector never falls back to another field. Without a non-empty selector, only input focus in the selected target window is used.
+      description: >-
+        Requires textInputTargeting capability for the extended targeting contract.
+        Use focused:true to address input focus explicitly; a simultaneous non-empty
+        selector is invalid_input_target. Omitted/empty selectors retain legacy focus
+        behavior. Selector matches resolve editable nodes, their child labels, and
+        explicit labelFor/labeledBy relationships within the owning window. Multiple
+        eligible controls fail with ambiguous_target before mutation. Matching a
+        non-editable container does not select its editable descendants. Selectors
+        never fall back to focus. A successful response means ACTION_SET_TEXT was
+        accepted; callers must verify the resulting text/application outcome.
       required: [value]
       properties:
         selector:
           $ref: "#/components/schemas/Selector"
+        focused:
+          type: boolean
+          default: false
+          description: Use the focused editable node in the resolved window; incompatible with a non-empty selector.
+        package:
+          type: string
+        windowId:
+          type: integer
+          minimum: 0
+        displayId:
+          type: integer
+          minimum: 0
         value:
           type: string
         clear:

@@ -516,18 +516,32 @@ Use ADB or Android shell commands only when Henyo launch is insufficient, when r
 
 ## Text Input
 
-Open/focus the target input first, then set text:
+Prefer an explicit target and verify the resulting field before submitting:
 
 ```sh
-bin/henyo click Search --exact --field desc
-bin/henyo set Search Battery
+bin/henyo set Search sample --exact --package com.example.app --window-id 17 --display-id 0
+bin/henyo set --focused sample --package com.example.app --window-id 17 --display-id 0
 ```
 
-If `set-text` fails, inspect the UI tree for the actual editable node:
+Discover `textInputTargeting` through `bin/henyo version` before relying on the
+extended targeting contract. `--focused` needs no empty search string and edits
+only the input-focused editable control in the resolved window. Legacy
+`bin/henyo set '' sample` remains supported. Selector input resolves the editable
+node itself, a matching child label's nearest editable ancestor, or explicit
+Android label relationships. It never guesses by proximity, selects an arbitrary
+editable descendant of a generic container, or falls back to focus on failure.
+Multiple resolved controls in the owning window return `ambiguous_target` before
+input; narrow the selector using the observed view ID or target window.
 
-```sh
-bin/henyo tree 5
-```
+If input fails, inspect a fresh tree. `not_found` means no selector match;
+`not_editable` means the match has no owning/related editable control;
+`no_focused_editable` means the resolved window has no focused editable field;
+`set_text_rejected` means Android rejected `ACTION_SET_TEXT`.
+`invalid_input_target` means conflicting selector/focus modes or a malformed
+focused option. `tree_unavailable` cannot establish target uniqueness. A success
+response proves action acceptance only: read back the field and verify the
+application outcome. Do not blindly retry an unknown outcome or submit after a
+failed verification.
 
 ## Lock Screen Unlock
 

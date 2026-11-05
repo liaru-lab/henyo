@@ -22,7 +22,7 @@ import java.util.Map;
 public final class OperationOutcomesHarness {
     Match selected, focused;
     int selectedLookups, focusedLookups;
-    boolean unavailable, dispatchAllowed = true;
+    boolean unavailable, dispatchAllowed = true, actionAccepted = true;
 
     public static void main(String[] args) {
         long start = 1_000_000_000L;
@@ -51,11 +51,10 @@ public final class OperationOutcomesHarness {
 
         OperationOutcomesHarness service = new OperationOutcomesHarness();
         service.focused = new Match("unchanged");
-        Response missing = service.setText(Map.of("text", "missing", "value", "synthetic"));
-        check(missing.status == 404, "explicit missing selector fails");
+        expect("not_found", () -> service.setText(Map.of("text", "missing", "value", "synthetic")));
         check(service.focusedLookups == 0 && service.focused.node.saved.equals("unchanged"),
                 "explicit selector cannot edit focused fallback");
-        service.setText(Map.of("target", "missing", "value", "synthetic"));
+        expect("not_found", () -> service.setText(Map.of("target", "missing", "value", "synthetic")));
         check(service.focusedLookups == 0, "legacy target alias cannot fall back");
 
         service.selected = new Match("selected");
@@ -67,6 +66,22 @@ public final class OperationOutcomesHarness {
         check(service.selectedLookups == lookups && service.focused.node.saved.equals("focused"),
                 "selector-free edits use focus only");
 
+        service.setText(Map.of("focused", "true", "value", "explicit focus"));
+        check(service.focused.node.saved.equals("explicit focus"), "explicit focus works");
+        expect("invalid_input_target", () -> service.setText(Map.of("focused", "true", "text", "selected")));
+        expect("invalid_input_target", () -> service.setText(Map.of("focused", "true", "target", "selected")));
+        expect("invalid_input_target", () -> service.setText(Map.of("focused", "invalid")));
+        check(service.focused.node.saved.equals("explicit focus"), "invalid modes do not edit focused field");
+        service.focused = new Match("explicit focus");
+        service.setText(Map.of("focused", "true", "value", " suffix", "clear", "false"));
+        check(service.focused.node.saved.equals("explicit focus suffix"), "append reads text from editable control");
+        service.focused = null;
+        expect("no_focused_editable", () -> service.setText(Map.of("focused", "true", "value", "synthetic")));
+        service.selected = new Match("unchanged");
+        service.actionAccepted = false;
+        expect("set_text_rejected", () -> service.setText(Map.of("text", "selected", "value", "synthetic")));
+        check(service.selected.recycled && service.selected.node.saved.equals("unchanged"), "rejected edit releases node");
+        service.actionAccepted = true;
         service.selected = new Match("unchanged");
         service.dispatchAllowed = false;
         try {
@@ -97,6 +112,10 @@ public final class OperationOutcomesHarness {
         System.out.println("OperationOutcomesHarness passed");
     }
 
+    static void expect(String code, Runnable operation) {
+        try { operation.run(); throw new AssertionError("expected " + code); }
+        catch (OperationFailure failure) { check(failure.code.equals(code), "failure code " + code); }
+    }
     static void check(boolean value, String label) { if (!value) throw new AssertionError(label); }
     static String escape(String value) { return value.replace("\\", "\\\\").replace("\"", "\\\""); }
     static boolean boolParam(Map<String,String> p, String k, boolean d) {
@@ -117,7 +136,7 @@ public final class OperationOutcomesHarness {
     void checkDeadline() { checkControl(); }
     void checkControl() { if (!dispatchAllowed) throw new OperationFailure("deadline_exceeded", 408, "not_applied"); }
     void showPointGesture(int x, int y) {}
-    boolean controlledNodeAction(AccessibilityNodeInfo n, int a, Bundle b) { n.saved=b.text.toString(); return true; }
+    boolean controlledNodeAction(AccessibilityNodeInfo n, int a, Bundle b) { if (actionAccepted) n.saved=b.text.toString(); return actionAccepted; }
     Response targetConstraintError(OperationTargetConstraint c) { return json(400, "{}"); }
     String visibleTextsJson(int limit, boolean redact) { return "[]"; }
     static void sleep(long ms) { SystemClock.now += ms; }

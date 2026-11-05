@@ -46,6 +46,7 @@ KNOWN_DEVICE_STATES = frozenset({
 KNOWN_OPERATOR_ACTIONS = frozenset({"physical_reboot_then_first_unlock"})
 KNOWN_CAPABILITY_FEATURES = frozenset({
     "conditionalWorkflows",
+    "textInputTargeting",
     "expectedServiceEpoch",
     "mutationOutcome",
     "taskLifecycle",
@@ -1299,9 +1300,11 @@ class HelperDaemon:
     def request_features(request: Dict[str, Any]) -> set[str]:
         required: set[str] = set()
 
-        def inspect_params(value: Any) -> None:
+        def inspect_params(value: Any, op: Any = None) -> None:
             if not isinstance(value, dict):
                 return
+            if op == "ui.setText" and "focused" in value:
+                required.add("textInputTargeting")
             selector = value.get("selector")
             if isinstance(selector, dict):
                 inspect_params(selector)
@@ -1312,13 +1315,13 @@ class HelperDaemon:
 
         cmd = request.get("cmd")
         if cmd in ("tree", "observe", "call"):
-            inspect_params(request.get("params"))
+            inspect_params(request.get("params"), request.get("op"))
         elif cmd == "batch":
             steps = request.get("steps")
             if isinstance(steps, list):
                 for step in steps:
                     if isinstance(step, dict):
-                        inspect_params(step.get("params"))
+                        inspect_params(step.get("params"), step.get("op"))
         return required
 
     def require_request_features(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:

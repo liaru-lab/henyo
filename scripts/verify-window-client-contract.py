@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 import henyo.cli as cli  # noqa: E402
+from henyo.helper import HelperDaemon, KNOWN_CAPABILITY_FEATURES  # noqa: E402
 
 
 def invoke(argv, response=None):
@@ -41,6 +42,11 @@ def assert_call(argv, op, expected):
 
 
 def main():
+    assert "textInputTargeting" in KNOWN_CAPABILITY_FEATURES
+    focused_call = {"op": "ui.setText", "params": {"focused": True, "value": "sample"}}
+    assert HelperDaemon.request_features({"cmd": "call", **focused_call}) == {"textInputTargeting"}
+    assert HelperDaemon.request_features({"cmd": "batch", "steps": [focused_call]}) == {"textInputTargeting"}
+    assert HelperDaemon.request_features({"cmd": "call", "op": "ui.setText", "params": {"value": "sample"}}) == set()
     target = {"package": "com.example.maps", "windowId": 17, "displayId": 2}
     target_args = ["--package", target["package"], "--window-id", "17", "--display-id", "2"]
 
@@ -53,6 +59,27 @@ def main():
     assert_call(["set", "Search", "Tokyo", *target_args], "ui.setText", {
         "selector": {"text": "Search", "field": "any"}, "value": "Tokyo", **target,
     })
+    for prefix in ([], ["v1"]):
+        assert_call([*prefix, "set", "--focused", "synthetic", *target_args], "ui.setText", {
+            "focused": True, "value": "synthetic", **target,
+        })
+        assert_call([*prefix, "set", "", "synthetic", *target_args], "ui.setText", {
+            "selector": {"text": "", "field": "any"}, "value": "synthetic", **target,
+        })
+    for value in ("--package", "--focused", "", "a\nb", "--window-id"):
+        assert_call(["set", "--focused", value, *target_args], "ui.setText", {
+            "focused": True, "value": value, **target,
+        })
+        assert_call(["set", "Search", value, *target_args], "ui.setText", {
+            "selector": {"text": "Search", "field": "any"}, "value": value, **target,
+        })
+    for args in (["set"], ["set", "--focused"], ["set", "--focused", "synthetic", "--exact"],
+                 ["set", "--focused", "Search", "synthetic"]):
+        try:
+            invoke(args)
+            raise AssertionError("invalid input mode accepted")
+        except SystemExit:
+            pass
     assert_call(["wait", "Result", "--timeout", "9000", *target_args], "ui.wait", {
         "selector": {"text": "Result", "field": "any"},
         "timeout": 9000, "interval": 100, **target,

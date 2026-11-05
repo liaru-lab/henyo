@@ -218,12 +218,46 @@ A helper transport timeout returns `outcome:"unknown", retrySafe:false`: it is
 not evidence that the operation was canceled or never applied. Observe current
 state before deciding whether a mutation is safe to repeat.
 
-Explicit `ui.setText` selectors never fall back to another focused field. With
-no non-empty selector, only the focused editable field in the selected target
-window is eligible; another window's retained focus is not a fallback. A missing
-selector target returns `not_found`; unavailable or incompletely traversed trees
-return `tree_unavailable`. In particular, `ui.wait` with `gone:true` cannot use an
-unavailable tree as proof of disappearance.
+`ui.setText` supports explicit focused input without an empty search string:
+
+```json
+{"type":"call","id":"edit","op":"ui.setText","params":{"focused":true,"value":"sample","package":"com.example.app","windowId":17,"displayId":0}}
+```
+
+The `textInputTargeting` capability advertises this targeting contract. For the
+CLI, use `henyo set --focused VALUE` with the same optional window flags as
+`henyo set SELECTOR VALUE`. Omitting the selector or passing an empty selector
+continues to mean focused input for compatibility. Only input focus in the
+resolved target window is eligible; another window's retained focus is not a
+fallback. A non-empty selector combined with `focused:true` is
+`invalid_input_target` and cannot mutate the UI.
+
+Selector input resolves editable controls directly, the nearest editable ancestor
+of a matching child label, and explicit Android `labelFor` / `labeledBy`
+relationships. Repeated matches belonging to the same control are deduplicated.
+Resolution checks the complete bounded tree of the owning window before editing.
+Distinct eligible controls in that window return `ambiguous_target`. Matching a
+generic container does not authorize editing its descendants; unrelated siblings,
+nearby controls, and the focused field are never implicit fallbacks.
+
+| Text input failure | Meaning |
+| --- | --- |
+| `not_found` | No node matched the non-empty selector. |
+| `not_editable` | A label/node matched, but no structurally owned or explicitly related editable control exists. |
+| `no_focused_editable` | The resolved window has no focused editable control. |
+| `ambiguous_target` | The selector resolves to multiple editable controls in the owning window. |
+| `invalid_input_target` | Focus mode conflicts with a non-empty selector, or `focused` is not a boolean. |
+| `set_text_rejected` | Android returned false for `ACTION_SET_TEXT`. |
+| `tree_unavailable` | The tree is unavailable or traversal cannot establish absence/uniqueness. |
+
+These targeting and rejected-action failures report `outcome:"not_applied"` unless
+an earlier dispatch in a compound operation was accepted. Existing control,
+sensitive-control, stale-window, and deadline checks still apply. A successful
+set-text result proves Android accepted the action; callers should read the field
+again and verify the application-level outcome before submitting or retrying.
+
+Likewise, `ui.wait` with `gone:true` cannot use an unavailable tree as proof of
+disappearance.
 
 Rejected Android actions return `action_rejected` rather than a successful frame
 containing `ok:false`. Structured failures distinguish `outcome:"not_applied"`
@@ -588,7 +622,7 @@ WS operations intentionally mirror HTTP v1 request shapes where practical.
 | `ui.observe` | WS only | `maxDepth`, `onlyTextNodes`, `redact`, `maxNodes`, `timeout`, `maxAttempts`, `includeIndicator`; optional target fields | Targeted tree and screenshot with shared observation stability metadata; indicator excluded by default |
 | `ui.find` | `POST /v1/ui/find` | `selector`, `redact`; optional target fields | Find payload including the matched node's owning window |
 | `ui.click` | `POST /v1/ui/click` | `selector` or `x/y` or `bounds`; optional target fields | Node action in the resolved owning window, with guarded coordinate fallback |
-| `ui.setText` | `POST /v1/ui/set-text` | `selector`, `value`; optional target fields | Set text in the resolved owning window |
+| `ui.setText` | `POST /v1/ui/set-text` | `value`; optional `selector` or `focused:true`, `clear`, target fields | Set text in a uniquely resolved editable control |
 | `ui.tap` | `POST /v1/ui/tap` | `x`, `y`; optional `coordinateSpace`, `captureId` | Screen-coordinate tap by default; safely mapped screenshot-coordinate tap when requested |
 | `ui.swipe` | `POST /v1/ui/swipe` | `x1`, `y1`, `x2`, `y2`, `duration`; optional `coordinateSpace`, `captureId` | Screen-coordinate swipe by default; safely mapped screenshot-coordinate swipe when requested |
 | `ui.scroll` | `POST /v1/ui/scroll` | `direction` | Existing scroll payload |

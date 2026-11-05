@@ -2417,7 +2417,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
     }
 
     private static String capabilitiesJson() {
-        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\",\"conditionalWorkflows\",\"onDeviceAssistance\"");
+        StringBuilder features = new StringBuilder("[\"windowTargeting\",\"explicitCaptureMode\",\"taskLifecycle\",\"conditionalWorkflows\",\"onDeviceAssistance\",\"textInputTargeting\"");
         if (Build.VERSION.SDK_INT >= 30) {
             features.append(",\"displayTargeting\",\"displayCapture\",\"screenshotCoordinates\"");
         }
@@ -2988,9 +2988,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
         }
         OperationTargetConstraint constraint = OperationTargetConstraint.from(params);
         if (!constraint.valid) return targetConstraintError(constraint);
-        Match match = options.needle.isEmpty() ? findFocusedEditable(constraint)
-                : findEditableMatch(options, constraint);
-        if (match == null) return json(404, "{\"ok\":false,\"error\":\"not_found\"}");
+        String focusedParam = params.getOrDefault("focused", "false");
+        if (!"true".equals(focusedParam) && !"false".equals(focusedParam))
+            throw new OperationFailure("invalid_input_target", 400, "not_applied");
+        if ("true".equals(focusedParam) && !options.needle.isEmpty())
+            throw new OperationFailure("invalid_input_target", 400, "not_applied");
+        boolean useFocus = options.needle.isEmpty();
+        Match match = useFocus ? findFocusedEditable(constraint) : findEditableMatch(options, constraint);
+        if (match == null) throw new OperationFailure(useFocus ? "no_focused_editable" : "not_found", 404, "not_applied");
         showPointGesture(match.centerX(), match.centerY());
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, clear ? value : match.text + value);
@@ -3002,7 +3007,8 @@ public class HenyoAccessibilityService extends AccessibilityService {
         } finally {
             match.recycle();
         }
-        return json(200, "{\"ok\":" + ok + ",\"target\":" + targetJson + "}");
+        if (!ok) throw new OperationFailure("set_text_rejected", 409, "not_applied");
+        return json(200, "{\"ok\":true,\"target\":" + targetJson + "}");
     }
 
     private Response targetConstraintError(OperationTargetConstraint constraint) {
@@ -3759,19 +3765,14 @@ public class HenyoAccessibilityService extends AccessibilityService {
         return findAcrossWindows(options, constraint, MATCH_EDITABLE);
     }
 
-    private Match findEditableMatch(AccessibilityNodeInfo node, SearchOptions options, TargetRef target,
-            SearchCoverage coverage, int depth) {
-        if (!coverage.visit(depth)) return null;
-        if (node.isEditable() && nodeMatches(node, options)) return Match.from(node, target);
-        for (int i = 0; i < node.getChildCount() && coverage.hasBudget(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) { coverage.unavailable(); continue; }
-            Match match;
-            try { match = findEditableMatch(child, options, target, coverage, depth + 1); }
-            finally { child.recycle(); }
-            if (match != null) return match;
-        }
-        return null;
+    private Match findEditableMatch(AccessibilityNodeInfo root, SearchOptions options, TargetRef target,
+            SearchCoverage coverage) {
+        TextInputTargetResolver resolver = new TextInputTargetResolver(
+                node -> nodeMatches(node, options), this::checkDeadline, root.getWindowId(), coverage);
+        AccessibilityNodeInfo editable = resolver.resolve(root);
+        if (editable == null) return null;
+        try { return Match.from(editable, target); }
+        finally { editable.recycle(); }
     }
 
     private Match findFocusedEditable(OperationTargetConstraint constraint) {
@@ -3862,7 +3863,7 @@ public class HenyoAccessibilityService extends AccessibilityService {
                     requireRootAccess(root);
                     TargetSnapshot snapshot = targetSnapshot(windows, selected, root, packageName);
                     TargetRef target = snapshot.ref();
-                    if (mode == MATCH_EDITABLE) result = findEditableMatch(root, options, target, coverage, 0);
+                    if (mode == MATCH_EDITABLE) result = findEditableMatch(root, options, target, coverage);
                     else result = findMatch(root, options, target, coverage, 0);
                     if (result != null) {
                         acceptResolvedTarget(snapshot);

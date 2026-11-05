@@ -127,6 +127,20 @@ def selector_call_params(text: str, argv: List[str]) -> Dict[str, Any]:
     return {"selector": selector(text, rest), **target}
 
 
+def set_text_params(argv: List[str]) -> Dict[str, Any]:
+    if argv and argv[0] == "--focused":
+        if len(argv) < 2:
+            raise SystemExit("set --focused requires exactly one text value")
+        rest, target = target_options(argv[2:])
+        if rest:
+            raise SystemExit("set --focused requires exactly one text value")
+        return {"focused": True, "value": argv[1], **target}
+    if len(argv) < 2:
+        raise SystemExit("set requires SELECTOR VALUE or --focused VALUE")
+    rest, target = target_options(argv[2:])
+    return {"selector": selector(argv[0], rest), "value": argv[1], **target}
+
+
 def intent_options(argv: List[str]) -> tuple[List[str], Dict[str, str] | None]:
     """Remove the common --intent option without inspecting operation params."""
     rest: List[str] = []
@@ -890,9 +904,7 @@ def v1_cmd(argv: List[str], display: Dict[str, str] | None = None) -> int:
         if options: raise SystemExit(f"unknown click-bounds option: {options[0]}")
         return control_call("ui.click", {"bounds": ",".join(rest[:4]), **target}, display)
     if sub == "set":
-        params = selector_call_params(rest[0], rest[2:])
-        params["value"] = rest[1]
-        return control_call("ui.setText", params, display)
+        return control_call("ui.setText", set_text_params(rest), display)
     if sub == "tap":
         return control_call("ui.tap", coordinate_gesture_params("tap", rest), display)
     if sub == "swipe":
@@ -974,6 +986,8 @@ def usage() -> None:
   henyo apps [--all]
   henyo open-uri URI [--package PACKAGE] [--intent TEXT]
   henyo version
+  henyo set SELECTOR VALUE [--exact] [--field FIELD] [--package PACKAGE] [--window-id ID] [--display-id ID]
+  henyo set --focused VALUE [--package PACKAGE] [--window-id ID] [--display-id ID]
   henyo health
   henyo v1 health|tree|observe|find|click|current|back|home|screenshot ...
   henyo tree [DEPTH] [--fresh] [--max-age MS] [--package PACKAGE] [--window-id ID] [--display-id ID]
@@ -1128,9 +1142,7 @@ def main(argv=None) -> int:
             raise SystemExit(f"unknown wait-gone option: {wait_args[0]}")
         return control_call("ui.wait", {"selector": {"text": rest[0]}, "gone": True, "timeout": timeout, **target}, display)
     if cmd == "set":
-        params = selector_call_params(rest[0], rest[2:])
-        params["value"] = rest[1]
-        return control_call("ui.setText", params, display)
+        return control_call("ui.setText", set_text_params(rest), display)
     if cmd == "tap":
         return control_call("ui.tap", coordinate_gesture_params("tap", rest), display)
     if cmd == "swipe":
