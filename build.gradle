@@ -297,7 +297,7 @@ tasks.register("check") {
     dependsOn "verifyTaskPresentation"
     dependsOn "verifyTaskLifecycle"
     dependsOn "verifyHttpRequestReader"
-    dependsOn "verifyOperationOutcomes"
+    dependsOn "verifyOperationOutcomes", "verifyTextInputTarget"
     dependsOn "verifyScreenshotCallback"
     dependsOn "verifyCaptureCompletion"
     dependsOn "verifyControlOwnership"
@@ -502,4 +502,8 @@ tasks.register("verifyTargetAccess", Exec) {
 
 tasks.register("verifyConditionalWorkflow", Exec) {
     commandLine "python", "scripts/verify-conditional-workflow.py"
+}
+
+tasks.register("verifyTextInputTarget", Exec) {
+    commandLine "python", "scripts/verify-text-input-target.py"
 }
