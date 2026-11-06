@@ -94,3 +94,59 @@ with tempfile.TemporaryDirectory() as directory:
     )
 
 print("cursor motion easing verifier passed")
+
+# Exercise the production coordinate controller without Android drawing classes.
+coordinates = overlay.split("    private static final class VisualCoordinates {", 1)[1].split(
+    "    private static final class IndicatorView", 1
+)[0]
+TRAIL_TEST = r'''
+package link.liaru.henyo;
+public final class CursorTrailTest {
+    private static void check(boolean value, String message) {
+        if (!value) throw new AssertionError(message);
+    }
+    public static void main(String[] args) {
+        VisualCoordinates c = new VisualCoordinates();
+        float[] sample = new float[2];
+        check(c.trailSampleAt(1200L, 30, 1f, sample) == 0f, "uninitialized cursor has no trail");
+        c.initialized = true;
+        c.travelStartedAtMs = 1000L;
+        c.travelDurationMs = 400;
+        c.travelFromX = 100f; c.travelFromY = 200f;
+        c.travelToX = 500f; c.travelToY = 200f;
+        check(c.trailSampleAt(1200L, 30, 1f, sample) > 0f, "fast movement has a trail");
+        check(sample[0] < 300f, "trail follows behind the cursor");
+        check(c.trailSampleAt(1400L, 60, 1f, sample) > 0f, "trail survives the instant motion stops");
+        float early = c.trailSampleAt(1380L, 40, 1f, sample);
+        float later = c.trailSampleAt(1420L, 80, 1f, sample);
+        check(early > later && later > 0f, "same moving point fades as it ages after a stop");
+        for (int age = 1; age < 120; age++) {
+            check(c.trailSampleAt(1520L, age, 1f, sample) == 0f, "no samples survive 120ms after stop");
+            float alpha = c.trailSampleAt(1200L, age, 1f, sample);
+            check(alpha >= 0f && alpha <= 0.22f, "opacity is bounded");
+            if (alpha > 0f) check(Math.hypot(sample[0] - 300f, sample[1] - 200f) <= 72.001,
+                    "trail distance is bounded");
+        }
+        c.travelToX = c.travelFromX;
+        check(c.trailSampleAt(1200L, 30, 1f, sample) == 0f, "stationary cursor never accumulates trail");
+        c.travelToX = 500f;
+        c.actionStartedAtMs = 1200L;
+        check(c.trailSampleAt(1210L, 30, 1f, sample) == 0f, "new pose excludes the preceding segment");
+        c.clear();
+        check(c.trailSampleAt(1210L, 30, 1f, sample) == 0f, "cleared session leaves no trail");
+        c.initialized = true; c.travelStartedAtMs = 1210L;
+        check(c.trailSampleAt(1220L, 30, 1f, sample) == 0f, "new session cannot revive prior trail");
+    }
+    private static final class VisualCoordinates {
+'''
+with tempfile.TemporaryDirectory(prefix="henyo-cursor-trail-") as directory:
+    temp = Path(directory)
+    test_file = temp / "CursorTrailTest.java"
+    test_file.write_text(TRAIL_TEST + coordinates + "\n}\n")
+    sources = [EASING, EASING.parent / "AgentVisualModel.java",
+               EASING.parent / "ObservationEffectModel.java", test_file]
+    subprocess.run(["javac", "-d", str(temp), *map(str, sources)], check=True, cwd=ROOT)
+    subprocess.run(["java", "-cp", str(temp), "link.liaru.henyo.CursorTrailTest"], check=True, cwd=ROOT)
+require(overlay, "visualCoordinates.isAnimating(now - VisualCoordinates.TRAIL_MS)",
+        "render scheduling must continue while post-stop trails are fading")
+print("cursor trail persistence verifier passed")
